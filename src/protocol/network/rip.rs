@@ -3,6 +3,7 @@ use std::net; // maybe HashMap?
 
 const MAX_ROUTES: usize = 128;
 const MAX_TTL: usize = 128;
+const INFINITY: usize = 16;
 
 #[derive(Hash, PartialEq, Eq)]
 pub struct Route {

@@ -1,6 +1,7 @@
-mod protocol;
+use crate::protocol::network::NetworkInterface;
+use std::collections::HashMap;
 
 pub struct Node {
-    interfaces: Vec<protocol::network::NetworkInterface>,
-    routes: HashMap<protocol::network::NetworkInterface, usize>,
+    interfaces: Vec<NetworkInterface>,
+    routes: HashMap<NetworkInterface, usize>,
 }
