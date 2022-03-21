@@ -4,7 +4,7 @@ use std::net; // maybe HashMap?
 const MAX_ROUTES: usize = 128;
 const MAX_TTL: usize = 128;
 
-#[derive(Hash, Eq)]
+#[derive(Hash, PartialEq, Eq)]
 pub struct Route {
     pub dst_addr: net::Ipv4Addr,
     pub next_hop: net::Ipv4Addr,
@@ -20,7 +20,7 @@ pub struct RoutingTable {
 impl RoutingTable {
     pub fn new(routes: Vec<Route>) -> RoutingTable {
         RoutingTable {
-            routes: HashSet::from_iter(routes.iter()), // TODO: do we need to clone
+            routes: HashSet::from_iter(routes.into_iter()), // TODO: do we need to clone
         }
     }
 }
