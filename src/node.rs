@@ -29,7 +29,7 @@ impl Node {
      * Returns:
      * - A Result<Node, Error> with a default node, or error.
      */
-    pub fn empty() -> Result<Node, Error> {
+    pub fn new_empty() -> Result<Node, Error> {
         Ok(Node {
             src_link: LinkInterface::new(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?,
             interfaces: Vec::new(),
@@ -51,7 +51,7 @@ impl Node {
         match read_lines(&linksfile) {
             // if successful, create initial node
             Ok(lines) => {
-                let mut node = Node::empty()?;
+                let mut node = Node::new_empty()?;
                 // iterate through every line
                 for (index, line) in lines.enumerate() {
                     if let Ok(line) = line {
@@ -157,6 +157,56 @@ impl Node {
             }
         }
         res
+    }
+
+    /**
+     * Bring the link of an interface "down"
+     */
+    pub fn interface_link_down(&mut self, id: isize) -> Result<(), Error> {
+        if id < 0 || id as usize >= self.interfaces.len() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "interface {} out of bounds : (0 to {})",
+                    id,
+                    self.interfaces.len()
+                ),
+            ));
+        }
+        let id = id as usize;
+        if !self.interfaces[id].dst_link.active {
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                format!("interface {} is down already", id),
+            ));
+        }
+        self.interfaces[id].dst_link.active = false;
+        Ok(())
+    }
+
+    /**
+     * Bring the link of an interface "up"
+     */
+    pub fn interface_link_up(&mut self, id: isize) -> Result<(), Error> {
+        if id < 0 || id as usize >= self.interfaces.len() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "interface {} out of bounds : (0 to {})",
+                    id,
+                    self.interfaces.len()
+                ),
+            ));
+        }
+        let id = id as usize;
+        if self.interfaces[id].dst_link.active {
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                format!("interface {} is up already", id),
+            ));
+        }
+        self.interfaces[id].dst_link.active = true;
+        Ok(())
     }
 }
 
