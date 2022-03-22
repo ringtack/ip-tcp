@@ -67,13 +67,33 @@ fn main() {
         process::exit(0);
     });
 
-    shell.new_command("down", "Bring an interface “down”", 1, |io, _, s| {
-        writeln!(io, "Down {}", s[0])?;
+    shell.new_command("down", "Bring an interface “down”", 1, |io, node, s| {
+        match s[0].parse::<isize>() {
+            Ok(id) => match node.interface_link_down(id) {
+                Err(err) => {
+                    writeln!(io, "{}", err)?;
+                }
+                Ok(()) => {
+                    writeln!(io, "interface {} is now disabled", id)?;
+                }
+            },
+            Err(_) => writeln!(io, "syntax error (usage: down [interface])")?,
+        }
         Ok(())
     });
 
-    shell.new_command("up", "Bring an interface “up”", 1, |io, _, s| {
-        writeln!(io, "Up {}", s[0])?;
+    shell.new_command("up", "Bring an interface “up”", 1, |io, node, s| {
+        match s[0].parse::<isize>() {
+            Ok(id) => match node.interface_link_up(id) {
+                Err(err) => {
+                    writeln!(io, "{}", err)?;
+                }
+                Ok(()) => {
+                    writeln!(io, "interface {} is now enabled", id)?;
+                }
+            },
+            Err(_) => writeln!(io, "syntax error (usage: up [interface])")?,
+        }
         Ok(())
     });
 
