@@ -19,12 +19,13 @@ pub struct RoutingTable {
 }
 
 impl RoutingTable {
-    pub fn new(route_list: Vec<Route>) -> RoutingTable {
-        let mut routes = HashMap::new();
-        for route in route_list {
-            routes.insert(route.dst_addr, route);
+    pub fn new() -> RoutingTable {
+        RoutingTable {
+            routes: HashMap::new(),
         }
-        RoutingTable { routes }
+    }
+    pub fn insert(&mut self, route: Route) {
+        self.routes.insert(route.dst_addr, route);
     }
 }
 

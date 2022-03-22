@@ -23,13 +23,13 @@ fn main() {
     }
     //TODO read and parse linksfile here
 
-    let mut shell = Shell::new(());
+    let mut shell = Shell::new((node));
 
     // let node = Node::new(5);
     shell.new_command_noargs(
         "interfaces",
         "Print information about each interface, one per line",
-        |io, _| {
+        |io, node| {
             writeln!(io, "interfaces")?;
             Ok(())
         },

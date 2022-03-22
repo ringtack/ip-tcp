@@ -1,3 +1,4 @@
+use crate::protocol::network::rip::Route;
 use crate::protocol::network::rip::RoutingTable;
 use crate::protocol::network::NetworkInterface;
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ impl Node {
         Node {
             src_addr: net::SocketAddrV4::new(net::Ipv4Addr::UNSPECIFIED, 0),
             interfaces: Vec::new(),
-            routing_table: RoutingTable::new(Vec::new()),
+            routing_table: RoutingTable::new(),
         }
     }
 
@@ -35,15 +36,22 @@ impl Node {
                             continue;
                         }
                         let line: Vec<&str> = line.split_whitespace().collect();
+                        let dest_addr = str_2_ipv4(line[3]);
                         node.interfaces.push(NetworkInterface::new(
                             (index - 1) as u8,
                             str_2_ipv4(line[2]),
-                            str_2_ipv4(line[3]),
+                            dest_addr,
                             net::SocketAddrV4::new(
                                 str_2_ipv4(line[0]),
                                 line[1].parse::<u16>().unwrap(),
                             ),
                         )?);
+                        node.routing_table.insert(Route {
+                            dst_addr: dest_addr,
+                            next_hop: dest_addr,
+                            cost: 1,
+                            changed: false,
+                        })
                     }
                 }
                 Ok(node)
