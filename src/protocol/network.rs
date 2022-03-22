@@ -4,6 +4,16 @@ use crate::protocol::network::rip::DEFAULT_TTL;
 use etherparse::{IpNumber, Ipv4Header};
 use std::{io::Error, mem, net, slice};
 
+/**
+ * Struct representing a single network interface.
+ *
+ * Fields:
+ * - id: the unique ID of this IF.
+ * - src_addr: the IP address of the source IF.
+ * - src_link: reference to the Node's link interface. SHOULD NOT CHANGE!
+ * - dst_addr: the IP address of the dest IF.
+ * - dst_link: the link interface of the destination.
+ */
 pub struct NetworkInterface {
     pub id: u8,
     pub src_addr: net::Ipv4Addr,
@@ -12,12 +22,26 @@ pub struct NetworkInterface {
     pub dst_link: LinkInterface,
 }
 
+/**
+ * IP Packet.
+ */
 pub struct IPPacket<'a> {
     header: Ipv4Header,
     payload: &'a [u8], // how to make VLA in Rust?
 }
 
 impl<'a> IPPacket<'a> {
+    /**
+     * Creates a new IP packet.
+     *
+     * Inputs:
+     * - net_if: The NetworkInterface on which the packet will be sent
+     * - payload: the payload of the packet
+     * - ttl: time to live (usually default = 16)
+     *
+     * Returns:
+     * - an IP Packet!
+     */
     pub fn new(net_if: &NetworkInterface, payload: &'a [u8], ttl: u8) -> IPPacket<'a> {
         IPPacket {
             header: Ipv4Header::new(
@@ -59,10 +83,8 @@ impl NetworkInterface {
         let p: *const u8 = p as *const u8;
         // interpret as slice
         let payload: &[u8] = unsafe { slice::from_raw_parts(p, mem::size_of::<IPPacket>()) };
-        let mut buf = [0; MTU];
-        buf.copy_from_slice(payload);
         // convert packet to link level payload, then send
-        self.src_link.send_link_frame(&self.dst_link, buf)?;
+        self.src_link.send_link_frame(&self.dst_link, payload)?;
         Ok(())
     }
 }

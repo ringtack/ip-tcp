@@ -3,13 +3,23 @@ use std::net;
 
 pub const MTU: usize = 1400;
 
-// TODO: implement Clone
+/**
+ * Struct representing a Link Interface.
+ *
+ * Fields:
+ * - socket: UDP Socket abstraction representing the link
+ * - socket_addr: Address of socket abstraction
+ * - active: whether link interface is on or off
+ */
 pub struct LinkInterface {
     socket: net::UdpSocket,
     socket_addr: net::SocketAddrV4,
     pub active: bool,
 }
 
+/**
+ * Allow for cloning the link interface. socket should be unchanged.
+ */
 impl Clone for LinkInterface {
     fn clone(&self) -> Self {
         LinkInterface {
@@ -21,8 +31,10 @@ impl Clone for LinkInterface {
 }
 
 impl LinkInterface {
+    /**
+     * Creates a new link interface, given a socket address.
+     */
     pub fn new(socket_addr: net::SocketAddrV4) -> Result<LinkInterface, Error> {
-        // let socket_addr = net::SocketAddrV4::new(phys_addr, port);
         let link_interface = LinkInterface {
             socket: net::UdpSocket::bind(socket_addr)?,
             socket_addr,
@@ -31,34 +43,65 @@ impl LinkInterface {
         Ok(link_interface)
     }
 
+    /**
+     * Enables the link interface.
+     */
     pub fn link_up(&mut self) {
         self.active = true;
     }
 
+    /**
+     * Enables the link interface.
+     */
     pub fn link_down(&mut self) {
         self.active = false;
     }
 
+    /**
+     * Sends a link frame to the destination link interface.
+     *
+     * Inputs:
+     * - dst_link: the target link interface.
+     * - payload: payload of the L2 frame. Size must be < MTU.
+     *
+     * Returns:
+     * - A Result<usize, Error> of the number of bytes sent, or an error
+     */
     pub fn send_link_frame(
         &self,
-        dest_link: &LinkInterface,
-        payload: [u8; MTU],
-    ) -> Result<usize, io::Error> {
-        if !self.active {
+        dst_link: &LinkInterface,
+        payload: &[u8],
+    ) -> Result<usize, Error> {
+        // if either current or dest link is down, don't send
+        if !self.active || !dst_link.active {
             return Err(Error::new(
                 ErrorKind::NotConnected,
                 "sending to unreachable address",
             ));
         }
-        self.socket.send_to(&payload, dest_link.socket_addr)
+        // if payload larger than MTU, don't send
+        if payload.len() > MTU {
+            return Err(Error::new(ErrorKind::InvalidData, "payload too large"));
+        }
+        self.socket.send_to(payload, dst_link.socket_addr)
     }
 
+    /**
+     * Receives a link frame.
+     *
+     * Returns:
+     * - A Result<(net::SocketAddr, [u8; MTU]), Error> of the source socket addr and payload, or an
+     * error
+     */
     pub fn recv_link_frame(&self) -> Result<(net::SocketAddr, [u8; MTU]), Error> {
+        // if locally not active, return an error
         if !self.active {
             return Err(Error::new(ErrorKind::NotConnected, "Link is down."));
         }
+        // store payload
         let mut payload: [u8; MTU] = [0; MTU];
         let (num_bytes, src_addr) = self.socket.recv_from(&mut payload)?;
+        // if read more than MTU, return error
         if num_bytes > MTU {
             return Err(Error::new(ErrorKind::Other, "received too many bytes."));
         }

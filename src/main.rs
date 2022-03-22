@@ -16,14 +16,26 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    let node = node::Node::new(args.linksfile);
-    if let Err(e) = node {
-        eprintln!("{}", e);
-        process::exit(1);
-    }
-    //TODO read and parse linksfile here
+    // Attempt to make a node
+    let node = match Node::new(args.linksfile) {
+        Ok(node) => node,
+        Err(e) => {
+            eprintln!("{}", e);
+            process::exit(1);
+        }
+    };
 
-    let mut shell = Shell::new(node.unwrap());
+    let mut shell = Shell::new(node);
+    shell.new_command_noargs("help", "Print this list of commands", |io, _| {
+        writeln!(io, "{}", HELP_MSG)?;
+        Ok(())
+    });
+
+    shell.new_command_noargs("h", "Print this list of commands", |io, _| {
+        writeln!(io, "{}", HELP_MSG)?;
+        Ok(())
+    });
+
     shell.new_command_noargs(
         "interfaces",
         "Print information about each interface, one per line",
@@ -51,6 +63,10 @@ fn main() {
         Ok(())
     });
 
+    shell.new_command_noargs("q", "Quit this node", |_, _| {
+        process::exit(0);
+    });
+
     shell.new_command("down", "Bring an interface “down”", 1, |io, _, s| {
         writeln!(io, "Down {}", s[0])?;
         Ok(())
@@ -66,5 +82,23 @@ fn main() {
         Ok(())
     });
 
+    shell.set_default(|io, _, _| {
+        writeln!(io, "Error: command not found. Help menu:\n{}", HELP_MSG)?;
+        Ok(())
+    });
+
     shell.run_loop(&mut ShellIO::default());
 }
+
+const HELP_MSG: &str = " help       : Print this list of commands
+ h          : See help
+ interfaces : Print information about each interface, one per line
+ li         : See interfaces
+ routes     : Print information about the route to each known destination, one per line
+ lr         : See routes
+ q          : Quit this node
+
+ send [ip] [protocol] [payload] : sends payload with protocol=protocol to virtual-ip ip
+ up [integer]   : Bring an interface \"up\" (it must be an existing interface, probably one you brought down)
+ down [integer] : Bring an interface \"down\"
+ ";
