@@ -36,20 +36,21 @@ impl Node {
                             continue;
                         }
                         let line: Vec<&str> = line.split_whitespace().collect();
-                        let dest_addr = str_2_ipv4(line[3]);
+                        let src_addr = str_2_ipv4(line[2]);
+                        let dst_addr = str_2_ipv4(line[3]);
                         node.interfaces.push(NetworkInterface::new(
                             (index - 1) as u8,
-                            str_2_ipv4(line[2]),
-                            dest_addr,
+                            src_addr,
+                            dst_addr,
                             net::SocketAddrV4::new(
                                 str_2_ipv4(line[0]),
                                 line[1].parse::<u16>().unwrap(),
                             ),
                         )?);
                         node.routing_table.insert(Route {
-                            dst_addr: dest_addr,
-                            next_hop: dest_addr,
-                            cost: 1,
+                            dst_addr: src_addr,
+                            next_hop: src_addr,
+                            cost: 0,
                             changed: false,
                         })
                     }
@@ -61,6 +62,38 @@ impl Node {
                 format!("invalid linksfile path: {}", linksfile),
             )),
         }
+    }
+
+    pub fn fmt_interfaces(&self) -> String {
+        let mut res = String::new();
+        res.push_str("id\trem\t\tloc\n");
+        for (index, interface) in self.interfaces.iter().enumerate() {
+            if !interface.dst_link.active {
+                continue;
+            }
+            res.push_str(
+                &(format!(
+                    "{}\t{}\t{}",
+                    interface.id, interface.dst_addr, interface.src_addr
+                )),
+            );
+            if index != self.interfaces.len() - 1 {
+                res.push_str("\n");
+            }
+        }
+        res
+    }
+
+    pub fn fmt_routes(&self) -> String {
+        let mut res = String::new();
+        res.push_str("cost\tdst\t\tloc\n");
+        for (index, (_, route)) in self.routing_table.iter().enumerate() {
+            res.push_str(&(format!("{}\t{}\t{}", route.cost, route.dst_addr, route.next_hop)));
+            if index != self.interfaces.len() - 1 {
+                res.push_str("\n");
+            }
+        }
+        res
     }
 }
 

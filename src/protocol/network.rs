@@ -5,10 +5,10 @@ use std::io::{Error, ErrorKind};
 use std::net;
 
 pub struct NetworkInterface {
-    id: u8,
-    src_addr: net::Ipv4Addr,
-    dst_addr: net::Ipv4Addr,
-    dst_link: LinkInterface,
+    pub id: u8,
+    pub src_addr: net::Ipv4Addr,
+    pub dst_addr: net::Ipv4Addr,
+    pub dst_link: LinkInterface,
 }
 
 impl NetworkInterface {

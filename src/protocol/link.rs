@@ -6,7 +6,7 @@ const MTU: usize = 1400;
 pub struct LinkInterface {
     socket: net::UdpSocket,
     socket_addr: net::SocketAddrV4,
-    active: bool,
+    pub active: bool,
 }
 
 pub struct LinkPayload {
