@@ -1,6 +1,7 @@
 mod node;
 mod protocol;
 use clap::Parser;
+use node::Node;
 use std::env;
 extern crate shrust;
 use shrust::{Shell, ShellIO};
@@ -16,6 +17,8 @@ fn main() {
     //TODO read and parse linksfile here
 
     let mut shell = Shell::new(());
+
+    // let node = Node::new(5);
     shell.new_command_noargs(
         "interfaces",
         "Print information about each interface, one per line",
