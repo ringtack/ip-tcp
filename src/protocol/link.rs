@@ -7,7 +7,7 @@ pub const MTU: usize = 1400;
 pub struct LinkInterface {
     socket: net::UdpSocket,
     socket_addr: net::SocketAddrV4,
-    active: bool,
+    pub active: bool,
 }
 
 impl Clone for LinkInterface {

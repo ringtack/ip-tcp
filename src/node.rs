@@ -45,18 +45,19 @@ impl Node {
                         }
                         // otherwise, make network interface:
                         //      <Dest L2 Address> <Dest L2 Port> <Src IF> <Dest IF>
+                        let src_addr = str_2_ipv4(line[2]);
                         let dest_addr = str_2_ipv4(line[3]);
                         node.interfaces.push(NetworkInterface::new(
                             (index - 1) as u8,
-                            str_2_ipv4(line[2]),
+                            src_addr,
                             node.src_link.clone(),
                             dest_addr,
                             sock_addr,
                         )?);
                         node.routing_table.insert(Route {
-                            dst_addr: dest_addr,
-                            next_hop: dest_addr,
-                            cost: 1,
+                            dst_addr: src_addr,
+                            next_hop: src_addr,
+                            cost: 0,
                             changed: false,
                         })
                     }
@@ -89,6 +90,38 @@ impl Node {
         // interpret as slice
         let payload: &[u8] = unsafe { slice::from_raw_parts(p, mem::size_of::<RIPMessage>()) };
         dest_if.send_ip(payload)
+    }
+
+    pub fn fmt_interfaces(&self) -> String {
+        let mut res = String::new();
+        res.push_str("id\trem\t\tloc\n");
+        for (index, interface) in self.interfaces.iter().enumerate() {
+            if !interface.dst_link.active {
+                continue;
+            }
+            res.push_str(
+                &(format!(
+                    "{}\t{}\t{}",
+                    interface.id, interface.dst_addr, interface.src_addr
+                )),
+            );
+            if index != self.interfaces.len() - 1 {
+                res.push_str("\n");
+            }
+        }
+        res
+    }
+
+    pub fn fmt_routes(&self) -> String {
+        let mut res = String::new();
+        res.push_str("cost\tdst\t\tloc\n");
+        for (index, (_, route)) in self.routing_table.iter().enumerate() {
+            res.push_str(&(format!("{}\t{}\t{}", route.cost, route.dst_addr, route.next_hop)));
+            if index != self.interfaces.len() - 1 {
+                res.push_str("\n");
+            }
+        }
+        res
     }
 }
 

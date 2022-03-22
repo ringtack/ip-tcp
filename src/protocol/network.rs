@@ -5,11 +5,11 @@ use etherparse::{IpNumber, Ipv4Header};
 use std::{io::Error, mem, net, slice};
 
 pub struct NetworkInterface {
-    id: u8,
-    src_addr: net::Ipv4Addr,
-    src_link: LinkInterface,
-    dst_addr: net::Ipv4Addr,
-    dst_link: LinkInterface,
+    pub id: u8,
+    pub src_addr: net::Ipv4Addr,
+    pub src_link: LinkInterface,
+    pub dst_addr: net::Ipv4Addr,
+    pub dst_link: LinkInterface,
 }
 
 pub struct IPPacket<'a> {

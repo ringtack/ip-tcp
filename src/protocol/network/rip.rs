@@ -1,3 +1,4 @@
+use std::collections::hash_map::Iter;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
@@ -27,6 +28,9 @@ impl RoutingTable {
     }
     pub fn insert(&mut self, route: Route) {
         self.routes.insert(route.dst_addr, route);
+    }
+    pub fn iter(&self) -> Iter<'_, Ipv4Addr, Route> {
+        self.routes.iter()
     }
 }
 

@@ -1,6 +1,8 @@
 *~
 \#*#
 
+target
+
 *.o
 
 .vagrant/
