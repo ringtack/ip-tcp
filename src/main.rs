@@ -23,33 +23,31 @@ fn main() {
     }
     //TODO read and parse linksfile here
 
-    let mut shell = Shell::new((node));
-
-    // let node = Node::new(5);
+    let mut shell = Shell::new(node.unwrap());
     shell.new_command_noargs(
         "interfaces",
         "Print information about each interface, one per line",
         |io, node| {
-            writeln!(io, "interfaces")?;
+            writeln!(io, "{}", node.fmt_interfaces())?;
             Ok(())
         },
     );
-    shell.new_command_noargs("li", "See interfaces", |io, _| {
-        writeln!(io, "interfaces")?;
+    shell.new_command_noargs("li", "See interfaces", |io, node| {
+        writeln!(io, "{}", node.fmt_interfaces())?;
         Ok(())
     });
 
     shell.new_command_noargs(
         "routes",
         "Print information about the route to each known destination, one per line",
-        |io, _| {
-            writeln!(io, "routes")?;
+        |io, node| {
+            writeln!(io, "{}", node.fmt_routes())?;
             Ok(())
         },
     );
 
-    shell.new_command_noargs("lr", "See routes", |io, _| {
-        writeln!(io, "routes")?;
+    shell.new_command_noargs("lr", "See routes", |io, node| {
+        writeln!(io, "{}", node.fmt_routes())?;
         Ok(())
     });
 
