@@ -1,4 +1,4 @@
-mod rip;
+pub mod rip;
 use super::link::{LinkInterface, LinkPayload};
 use etherparse::Ipv4Header;
 use std::io::{Error, ErrorKind};

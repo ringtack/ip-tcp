@@ -1,18 +1,24 @@
 mod node;
 mod protocol;
+
 use clap::Parser;
-use std::env;
-extern crate shrust;
 use shrust::{Shell, ShellIO};
+use std::env;
 use std::io::prelude::*;
+use std::process;
 
 #[derive(Parser)]
-struct Cli {
+struct Args {
     linksfile: String,
 }
 
 fn main() {
-    let args = Cli::parse();
+    let args = Args::parse();
+    let node = node::Node::new(args.linksfile);
+    if let Err(e) = node {
+        eprintln!("{}", e);
+        process::exit(1);
+    }
     //TODO read and parse linksfile here
 
     let mut shell = Shell::new(());
