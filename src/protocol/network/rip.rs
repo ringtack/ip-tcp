@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-const MAX_ROUTES: usize = 128;
-const MAX_TTL: usize = 128;
-const INFINITY: usize = 16;
+pub const MAX_ROUTES: usize = 64;
+pub const DEFAULT_TTL: u8 = 16; // TODO: which value???
+pub const INFINITY: u32 = 16;
+pub const INIT_MASK: u32 = u32::MAX;
 
 #[derive(Hash, PartialEq, Eq)]
 pub struct Route {
@@ -35,6 +36,12 @@ pub struct RouteEntry {
     pub address: u32,
     pub mask: u32,
 }
+
+pub const DUMMY_ROUTE: RouteEntry = RouteEntry {
+    cost: INFINITY,
+    address: 0,
+    mask: INIT_MASK,
+};
 
 #[repr(packed)]
 pub struct RIPMessage {

@@ -1,17 +1,23 @@
 use std::io::{self, Error, ErrorKind};
 use std::net;
 
-const MTU: usize = 1400;
+pub const MTU: usize = 1400;
 
+// TODO: implement Clone
 pub struct LinkInterface {
     socket: net::UdpSocket,
     socket_addr: net::SocketAddrV4,
     active: bool,
 }
 
-pub struct LinkPayload {
-    buf: [u8; MTU],
-    len: usize,
+impl Clone for LinkInterface {
+    fn clone(&self) -> Self {
+        LinkInterface {
+            socket: self.socket.try_clone().unwrap(),
+            socket_addr: self.socket_addr,
+            active: self.active,
+        }
+    }
 }
 
 impl LinkInterface {
@@ -35,8 +41,8 @@ impl LinkInterface {
 
     pub fn send_link_frame(
         &self,
-        other: &LinkInterface,
-        payload: &LinkPayload,
+        dest_link: &LinkInterface,
+        payload: [u8; MTU],
     ) -> Result<usize, io::Error> {
         if !self.active {
             return Err(Error::new(
@@ -44,22 +50,18 @@ impl LinkInterface {
                 "sending to unreachable address",
             ));
         }
-        self.socket.send_to(&payload.buf, other.socket_addr)
+        self.socket.send_to(&payload, dest_link.socket_addr)
     }
 
-    pub fn recv_link_frame(&self) -> Result<(net::SocketAddr, LinkPayload), Error> {
+    pub fn recv_link_frame(&self) -> Result<(net::SocketAddr, [u8; MTU]), Error> {
         if !self.active {
             return Err(Error::new(ErrorKind::NotConnected, "Link is down."));
         }
-        let mut payload = LinkPayload {
-            buf: [0; 1400],
-            len: 0,
-        };
-        let (num_bytes, src_addr) = self.socket.recv_from(&mut payload.buf)?;
+        let mut payload: [u8; MTU] = [0; MTU];
+        let (num_bytes, src_addr) = self.socket.recv_from(&mut payload)?;
         if num_bytes > MTU {
             return Err(Error::new(ErrorKind::Other, "received too many bytes."));
         }
-        payload.len = num_bytes;
         Ok((src_addr, payload))
     }
 }

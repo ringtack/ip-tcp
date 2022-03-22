@@ -1,50 +1,57 @@
-use crate::protocol::network::rip::Route;
-use crate::protocol::network::rip::RoutingTable;
+use crate::protocol::link::LinkInterface;
+use crate::protocol::network::rip::{RIPMessage, Route, RoutingTable, DUMMY_ROUTE};
 use crate::protocol::network::NetworkInterface;
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{self, BufRead, Error, ErrorKind};
-use std::net;
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{self, BufRead, Error, ErrorKind},
+    mem,
+    net::{Ipv4Addr, SocketAddrV4},
+    path::Path,
+    slice,
+};
 
 pub struct Node {
-    src_addr: net::SocketAddrV4,
+    src_link: LinkInterface,
     interfaces: Vec<NetworkInterface>,
     routing_table: RoutingTable,
 }
 impl Node {
-    pub fn empty() -> Node {
-        Node {
-            src_addr: net::SocketAddrV4::new(net::Ipv4Addr::UNSPECIFIED, 0),
+    pub fn empty() -> Result<Node, Error> {
+        Ok(Node {
+            src_link: LinkInterface::new(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?,
             interfaces: Vec::new(),
             routing_table: RoutingTable::new(),
-        }
+        })
     }
 
     pub fn new(linksfile: String) -> Result<Node, Error> {
+        // Attempt to parse the linksfile
         match read_lines(&linksfile) {
+            // if successful, create initial node
             Ok(lines) => {
-                let mut node = Node::empty();
+                let mut node = Node::empty()?;
+                // iterate through every line
                 for (index, line) in lines.enumerate() {
                     if let Ok(line) = line {
+                        let line: Vec<&str> = line.split_whitespace().collect();
+                        // regardless of source or dest, gets addr:port
+                        let sock_addr =
+                            SocketAddrV4::new(str_2_ipv4(line[0]), line[1].parse::<u16>().unwrap());
+
+                        // if first line, is source "L2 address"
                         if index == 0 {
-                            let line: Vec<&str> = line.split_whitespace().collect();
-                            node.src_addr = net::SocketAddrV4::new(
-                                str_2_ipv4(line[0]),
-                                line[1].parse::<u16>().unwrap(),
-                            );
+                            node.src_link = LinkInterface::new(sock_addr)?;
                             continue;
                         }
-                        let line: Vec<&str> = line.split_whitespace().collect();
+                        // otherwise, make network interface:
+                        //      <Dest L2 Address> <Dest L2 Port> <Src IF> <Dest IF>
                         let dest_addr = str_2_ipv4(line[3]);
                         node.interfaces.push(NetworkInterface::new(
                             (index - 1) as u8,
                             str_2_ipv4(line[2]),
+                            node.src_link.clone(),
                             dest_addr,
-                            net::SocketAddrV4::new(
-                                str_2_ipv4(line[0]),
-                                line[1].parse::<u16>().unwrap(),
-                            ),
+                            sock_addr,
                         )?);
                         node.routing_table.insert(Route {
                             dst_addr: dest_addr,
@@ -54,13 +61,34 @@ impl Node {
                         })
                     }
                 }
+                // finally, send RIP Request to each of its net interfaces (i.e. neighbors)
+                for dest_if in &node.interfaces {
+                    let initial_route = DUMMY_ROUTE;
+                    let rip_msg = RIPMessage::new(1, 1, vec![initial_route]);
+                    node.send_rip_message(dest_if, rip_msg)?;
+                    // net_if.send_rip_request()
+                }
                 Ok(node)
             }
-            Err(e) => Err(Error::new(
+            Err(_) => Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!("invalid linksfile path: {}", linksfile),
             )),
         }
+    }
+
+    pub fn send_rip_message(
+        &self,
+        dest_if: &NetworkInterface,
+        msg: RIPMessage,
+    ) -> Result<(), Error> {
+        // obtain raw pointer to data
+        let p: *const RIPMessage = &msg;
+        // convert between pointer types (to u8)
+        let p: *const u8 = p as *const u8;
+        // interpret as slice
+        let payload: &[u8] = unsafe { slice::from_raw_parts(p, mem::size_of::<RIPMessage>()) };
+        dest_if.send_ip(payload)
     }
 }
 
@@ -72,11 +100,11 @@ where
     Ok(io::BufReader::new(file).lines())
 }
 
-fn str_2_ipv4(s: &str) -> net::Ipv4Addr {
+fn str_2_ipv4(s: &str) -> Ipv4Addr {
     if s == "localhost" {
-        net::Ipv4Addr::LOCALHOST
+        Ipv4Addr::LOCALHOST
     } else {
         let s: Vec<u8> = s.split(".").map(|x| x.parse::<u8>().unwrap()).collect();
-        net::Ipv4Addr::new(s[0], s[1], s[2], s[3])
+        Ipv4Addr::new(s[0], s[1], s[2], s[3])
     }
 }
