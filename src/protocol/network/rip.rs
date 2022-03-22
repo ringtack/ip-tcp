@@ -1,5 +1,8 @@
+use byteorder::*;
 use std::collections::hash_map::Iter;
 use std::collections::HashMap;
+use std::io::Error;
+use std::mem;
 use std::net::Ipv4Addr;
 
 pub const MAX_ROUTES: usize = 64;
@@ -54,21 +57,50 @@ impl RoutingTable {
  * - address: destination address
  * - mask: netmask; default is 255.255.255.255
  */
-#[repr(packed)]
 pub struct RouteEntry {
     pub cost: u32,
     pub address: u32,
     pub mask: u32,
 }
 
-/**
- * Dummy route for initial RIP request.
- */
-pub const DUMMY_ROUTE: RouteEntry = RouteEntry {
-    cost: INFINITY,
-    address: 0,
-    mask: INIT_MASK,
-};
+impl RouteEntry {
+    /**
+     * Dummy route for initial RIP request.
+     */
+    pub const DUMMY_ROUTE: RouteEntry = RouteEntry {
+        cost: INFINITY,
+        address: 0,
+        mask: INIT_MASK,
+    };
+
+    /**
+     * Converts struct into a vector of bytes.
+     */
+    pub fn to_bytes(&self) -> Vec<u8> {
+        // create byte vector of enough size
+        let mut bytes = Vec::<u8>::with_capacity(mem::size_of::<u32>() * 3);
+
+        // convert each field into bytes
+        bytes.extend_from_slice(&u32::to_be_bytes(self.cost));
+        bytes.extend_from_slice(&u32::to_be_bytes(self.address));
+        bytes.extend_from_slice(&u32::to_be_bytes(self.mask));
+        bytes
+    }
+
+    /**
+     * Parses a slice of bytes into a RouteEntry.
+     */
+    pub fn from_bytes(mut payload: &[u8]) -> Result<RouteEntry, Error> {
+        let cost = payload.read_u32::<NetworkEndian>()?;
+        let address = payload.read_u32::<NetworkEndian>()?;
+        let mask = payload.read_u32::<NetworkEndian>()?;
+        Ok(RouteEntry {
+            cost,
+            address,
+            mask,
+        })
+    }
+}
 
 /**
  * RIP Message.
@@ -78,7 +110,6 @@ pub const DUMMY_ROUTE: RouteEntry = RouteEntry {
  * - num_entries: number of RouteEntries
  * - entries: vector of entries
  */
-#[repr(packed)]
 pub struct RIPMessage {
     command: u16,
     num_entries: u16,
@@ -92,5 +123,44 @@ impl RIPMessage {
             num_entries,
             entries,
         }
+    }
+
+    /**
+     * Converts struct into a vector of bytes.
+     */
+    pub fn to_bytes(&self) -> Vec<u8> {
+        // create bytes vector of the correct size
+        let mut bytes: Vec<u8> = Vec::<u8>::with_capacity(
+            mem::size_of::<u16>() * 2 + (mem::size_of::<u32>() * 3) * (self.num_entries as usize),
+        );
+
+        // appends bytes of command and num_entries
+        bytes.extend_from_slice(&u16::to_be_bytes(self.command));
+        bytes.extend_from_slice(&u16::to_be_bytes(self.num_entries));
+
+        // for every entry, get byte representation and append to bytes
+        for i in 0..self.num_entries {
+            let entry_bytes = self.entries[i as usize].to_bytes();
+            bytes.extend_from_slice(entry_bytes.as_slice());
+        }
+
+        bytes
+    }
+
+    pub fn from_bytes(mut payload: &[u8]) -> Result<RIPMessage, Error> {
+        let command = payload.read_u16::<NetworkEndian>()?;
+        let num_entries = payload.read_u16::<NetworkEndian>()?;
+
+        let mut msg = RIPMessage {
+            command,
+            num_entries,
+            entries: Vec::with_capacity(num_entries as usize),
+        };
+
+        for _ in 0..num_entries {
+            msg.entries.push(RouteEntry::from_bytes(payload)?);
+        }
+
+        Ok(msg)
     }
 }

@@ -2,7 +2,13 @@ pub mod rip;
 use crate::protocol::link::{LinkInterface, MTU};
 use crate::protocol::network::rip::DEFAULT_TTL;
 use etherparse::{IpNumber, Ipv4Header};
-use std::{io::Error, mem, net, slice};
+use std::{
+    io::{Error, ErrorKind},
+    net,
+};
+
+pub const TEST_PROTOCOL: u8 = 0;
+pub const RIP_PROTOCOL: u8 = 200;
 
 /**
  * Struct representing a single network interface.
@@ -42,17 +48,25 @@ impl<'a> IPPacket<'a> {
      * Returns:
      * - an IP Packet!
      */
-    pub fn new(net_if: &NetworkInterface, payload: &'a [u8], ttl: u8) -> IPPacket<'a> {
-        IPPacket {
+    pub fn new(
+        net_if: &NetworkInterface,
+        payload: &'a [u8],
+        ttl: u8,
+        protocol: u8,
+    ) -> IPPacket<'a> {
+        let mut packet = IPPacket {
             header: Ipv4Header::new(
                 payload.len() as u16,
                 ttl,
-                IpNumber::ExperimentalAndTesting0, // IpNumber::from(200 as u8), // TODO: how to fix this?
+                IpNumber::IPv4, // dummy value, set later
                 net_if.src_addr.octets(),
                 net_if.dst_addr.octets(),
             ),
             payload,
-        }
+        };
+        // set protocol to specified protocol (test: 0, or RIP: 200)
+        packet.header.protocol = protocol;
+        packet
     }
 }
 
@@ -74,17 +88,36 @@ impl NetworkInterface {
         Ok(net_if)
     }
 
-    pub fn send_ip(&self, payload: &[u8]) -> Result<(), Error> {
+    /**
+     * Sends an IP packet with the given payload.
+     */
+    pub fn send_ip(&self, payload: &[u8], protocol: u8) -> Result<(), Error> {
         // make packet
-        let packet = IPPacket::new(self, payload, DEFAULT_TTL);
-        // obtain raw pointer to data
-        let p: *const IPPacket = &packet;
-        // convert between pointer types (to u8)
-        let p: *const u8 = p as *const u8;
-        // interpret as slice
-        let payload: &[u8] = unsafe { slice::from_raw_parts(p, mem::size_of::<IPPacket>()) };
-        // convert packet to link level payload, then send
-        self.src_link.send_link_frame(&self.dst_link, payload)?;
+        let packet = IPPacket::new(self, payload, DEFAULT_TTL, protocol);
+
+        // convert packet into bytes
+        let mut header_bytes = Vec::<u8>::with_capacity(packet.header.header_len());
+        // need custom check to convert to correct error type
+        if let Err(e) = packet.header.write(&mut header_bytes) {
+            return Err(Error::new(ErrorKind::Other, e.to_string()));
+        }
+
+        // combine into payload, and send
+        let payload = [header_bytes.as_slice(), payload].concat();
+        self.src_link
+            .send_link_frame(&self.dst_link, payload.as_slice())?;
         Ok(())
+    }
+
+    /*
+     * Receives an IP Packet.
+     */
+    pub fn recv_ip(&self) -> Result<IPPacket, Error> {
+        let payload: [u8; MTU] = [0; MTU];
+        self.src_link.recv_link_frame(&mut payload)?;
+        match Ipv4Header::from_slice(&payload) {
+            Ok((header, payload)) => Ok(IPPacket { header, payload }),
+            Err(e) => Err(Error::new(ErrorKind::Other, e.to_string())),
+        }
     }
 }

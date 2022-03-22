@@ -1,13 +1,11 @@
 use crate::protocol::link::LinkInterface;
-use crate::protocol::network::rip::{RIPMessage, Route, RoutingTable, DUMMY_ROUTE};
-use crate::protocol::network::NetworkInterface;
+use crate::protocol::network::rip::{RIPMessage, Route, RouteEntry, RoutingTable};
+use crate::protocol::network::{NetworkInterface, RIP_PROTOCOL, TEST_PROTOCOL};
 use std::{
     fs::File,
     io::{self, BufRead, Error, ErrorKind},
-    mem,
     net::{Ipv4Addr, SocketAddrV4},
     path::Path,
-    slice,
 };
 
 /**
@@ -91,7 +89,7 @@ impl Node {
 
                 // finally, send RIP Request to each of its net interfaces (i.e. neighbors)
                 for dest_if in &node.interfaces {
-                    let initial_route = DUMMY_ROUTE;
+                    let initial_route = RouteEntry::DUMMY_ROUTE;
                     let rip_msg = RIPMessage::new(1, 1, vec![initial_route]);
                     node.send_rip_message(dest_if, rip_msg)?;
                 }
@@ -119,13 +117,8 @@ impl Node {
         dest_if: &NetworkInterface,
         msg: RIPMessage,
     ) -> Result<(), Error> {
-        // obtain raw pointer to data
-        let p: *const RIPMessage = &msg;
-        // convert between pointer types (to u8)
-        let p: *const u8 = p as *const u8;
-        // interpret as slice
-        let payload: &[u8] = unsafe { slice::from_raw_parts(p, mem::size_of::<RIPMessage>()) };
-        dest_if.send_ip(payload)
+        let payload = msg.to_bytes();
+        dest_if.send_ip(payload.as_slice(), RIP_PROTOCOL)
     }
 
     /**
