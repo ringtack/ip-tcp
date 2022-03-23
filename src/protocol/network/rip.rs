@@ -1,5 +1,6 @@
-use crate::protocol::network::{IPPacket, NetworkInterface, RIP_PROTOCOL, TEST_PROTOCOL};
+use crate::protocol::network::{IPPacket, NetworkInterface, RIP_PROTOCOL};
 use byteorder::*;
+use std::cmp::min;
 use std::collections::hash_map::Iter;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
@@ -22,11 +23,11 @@ pub type Handler = Arc<Mutex<dyn FnMut(IPPacket) -> Result<()> + Send>>;
  *
  * Fields:
  * - dst_addr: the destination address
- * - next_hop: the next gateway
+ * - next_hop: the gateway address to the next node in the route
  * - cost: the cost to reach the destination
  * - changed: whether this route has been recently changed.
  */
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct Route {
     pub dst_addr: Ipv4Addr,
     pub next_hop: Ipv4Addr,
@@ -53,9 +54,22 @@ impl RoutingTable {
         self.routes.len()
     }
 
+    pub fn has_dst(&self, dst_addr: &Ipv4Addr) -> bool {
+        self.routes.contains_key(dst_addr)
+    }
+
+    pub fn get_route(&self, dst_addr: &Ipv4Addr) -> Route {
+        self.routes[dst_addr]
+    }
+
     pub fn insert(&mut self, route: Route) {
         self.routes.insert(route.dst_addr, route);
     }
+
+    pub fn delete(&mut self, dst_addr: &Ipv4Addr) {
+        self.routes.remove_entry(dst_addr);
+    }
+
     pub fn iter(&self) -> Iter<'_, Ipv4Addr, Route> {
         self.routes.iter()
     }
@@ -85,14 +99,14 @@ pub struct RouteEntry {
 }
 
 impl RouteEntry {
-    /**
+    /*
      * Dummy route for initial RIP request.
      */
-    pub const DUMMY_ROUTE: RouteEntry = RouteEntry {
-        cost: INFINITY,
-        address: 0,
-        mask: INIT_MASK,
-    };
+    // pub const DUMMY_ROUTE: RouteEntry = RouteEntry {
+    // cost: INFINITY,
+    // address: 0,
+    // mask: INIT_MASK,
+    // };
 
     /**
      * Converts RouteEntry into a vector of bytes.
@@ -184,7 +198,15 @@ impl RIPMessage {
         };
 
         for _ in 0..num_entries {
-            msg.entries.push(RouteEntry::from_bytes(payload)?);
+            // TODO: some issue with parsing multiple entries; payload isn't increasing
+            let cost = payload.read_u32::<NetworkEndian>()?;
+            let address = payload.read_u32::<NetworkEndian>()?;
+            let mask = payload.read_u32::<NetworkEndian>()?;
+            msg.entries.push(RouteEntry {
+                cost,
+                address,
+                mask,
+            });
         }
 
         Ok(msg)
@@ -244,33 +266,106 @@ pub fn in_interfaces(addr: &Ipv4Addr, interfaces: &[NetworkInterface]) -> isize 
     in_ifs
 }
 
+pub fn validate_entry(entry: &RouteEntry) -> Result<()> {
+    let ip_addr = Ipv4Addr::from(entry.address);
+    // check if unicast
+    if Ipv4Addr::is_unspecified(&ip_addr)
+        || Ipv4Addr::is_multicast(&ip_addr)
+        || Ipv4Addr::is_broadcast(&ip_addr)
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "must be unicast address!",
+        ));
+    }
+
+    // validate cost
+    // if entry.cost < 1 || entry.cost > 16 { // TODO: how to do this? RFC says if not [1, 16]
+    if entry.cost > 16 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "cost must be between 1 and 16, inclusive",
+        ));
+    }
+
+    Ok(())
+}
+
+/**
+ * Find opposite IP address of a gateway IP address.
+ */
+fn get_end_addr(interfaces: &[NetworkInterface], gateway_addr: &Ipv4Addr) -> Option<Ipv4Addr> {
+    let mut end_addr = None;
+
+    for net_if in interfaces {
+        if net_if.src_addr == *gateway_addr {
+            end_addr = Some(net_if.dst_addr);
+            break;
+        }
+    }
+
+    end_addr
+}
+
+/**
+ * Converts a route in the RoutingTable into a RouteEntry for RIPMessages.
+ */
+pub fn process_route(
+    interfaces: &[NetworkInterface],
+    src_addr: &Ipv4Addr,
+    dst_addr: &Ipv4Addr,
+    route: &Route,
+) -> Result<RouteEntry> {
+    // get next hop's end addr
+    // let end_addr = match get_end_addr(interfaces, &route.next_hop) {
+    // Some(addr) => addr,
+    // None => {
+    // return Err(Error::new(
+    // ErrorKind::Other,
+    // "did not pass in a gateway addr",
+    // ))
+    // }
+    // };
+
+    // if next hop is same as source, poison it
+    let cost = if route.next_hop == *src_addr {
+        INFINITY
+    } else {
+        route.cost as u32
+    };
+
+    // turn entry into route
+    Ok(RouteEntry {
+        cost,
+        address: u32::from_be_bytes(dst_addr.octets()),
+        mask: route.mask,
+    })
+}
+
 pub fn make_rip_handler(
     interfaces: Arc<Mutex<Vec<NetworkInterface>>>,
     routing_table: Arc<Mutex<RoutingTable>>,
 ) -> Handler {
     Arc::new(Mutex::new(move |packet: IPPacket| -> Result<()> {
-        let interfaces = Arc::clone(&interfaces);
         let interfaces = interfaces.lock().unwrap();
 
-        // get source IP address
-        let src_addr = Ipv4Addr::from(packet.header.source);
+        // get source (opposite IP) and gateway IP address (this is the destination of the packet!)
+        let source_addr = Ipv4Addr::from(packet.header.source);
+        let gateway_addr = Ipv4Addr::from(packet.header.destination);
 
-        println!("In RIP handler; packet from {}...", src_addr);
+        println!("Source: {}\tGateway: {}", source_addr, gateway_addr);
 
-        // check that source addr is one of the destination addresses
-        let src_if_index = in_interfaces(&src_addr, &*interfaces);
-
-        println!("src if index: {}", src_if_index);
-
+        // check that source addr is one of the destination interfaces
+        let src_if_index = in_interfaces(&source_addr, &*interfaces);
         if src_if_index < 0 {
             return Err(Error::new(
                 ErrorKind::Other,
-                "Source address not from reachable interface!",
+                "Source address not from directly connected neighbor!",
             ));
         }
         let src_if_index = src_if_index as usize;
 
-        // first, attempt to parse into rip message
+        // first, attempt to parse into rip message; validates that protocol is right
         let msg = recv_rip_message(&packet)?;
 
         println!("RIP Message: {:?}", msg);
@@ -278,42 +373,28 @@ pub fn make_rip_handler(
         // Handle Request
         if msg.command == RIP_REQUEST {
             match msg.num_entries {
-                // if no entries, do nothing
-                0 => return Ok(()),
-                // if 1 entry, check that entry is default
-                1 => {
-                    if msg.entries[0] != RouteEntry::DUMMY_ROUTE {
-                        return Err(Error::new(
-                            ErrorKind::Other,
-                            "RIP requests must have 1 entry with a default route.",
-                        ));
-                    }
-
-                    println!("in here 1");
+                // if no entries, send response
+                0 => {
+                    // TODO: this is how the RFC does it...
+                    // if msg.entries[0] != RouteEntry::DUMMY_ROUTE {
+                    // return Err(Error::new(
+                    // ErrorKind::Other,
+                    // "RIP requests must have 1 entry with a default route.",
+                    // ));
+                    // }
 
                     let routing_table = routing_table.lock().unwrap();
                     // for each entry in the routing table, add to RIP message
                     let mut entries: Vec<RouteEntry> =
                         Vec::<RouteEntry>::with_capacity(routing_table.size());
-                    for (dst_addr, entry) in routing_table.iter() {
-                        println!("in here 2");
 
-                        // if next hop is same as source, poison it
-                        let cost = if entry.next_hop == src_addr {
-                            INFINITY
-                        } else {
-                            entry.cost as u32
-                        };
-
-                        // turn entry into route
-                        let route_entry = RouteEntry {
-                            cost,
-                            address: u32::from_be_bytes(dst_addr.octets()),
-                            mask: entry.mask,
-                        };
-
+                    // for each route, process it (SH w/ PR) then add to entries
+                    for (dst_addr, route) in routing_table.iter() {
+                        let route_entry =
+                            process_route(&*interfaces, &source_addr, dst_addr, route)?;
                         entries.push(route_entry);
                     }
+
                     // make new RIP message
                     let msg = RIPMessage {
                         command: RIP_RESPONSE,
@@ -321,12 +402,10 @@ pub fn make_rip_handler(
                         entries,
                     };
 
-                    println!("Sending {:?}...", msg);
-
                     // send message response!
                     return send_rip_message(&interfaces[src_if_index], msg);
                 }
-                // if more than 1 entry, do nothing
+                // if more than 0 entries, do nothing
                 _ => {
                     return Err(Error::new(
                         ErrorKind::Other,
@@ -335,100 +414,66 @@ pub fn make_rip_handler(
                 }
             }
         } else if msg.command == RIP_RESPONSE {
-            return Ok(());
+            let mut routing_table = routing_table.lock().unwrap();
+            // for each entry in the routing table, add to RIP message
+            // let mut entries: Vec<RouteEntry> =
+            // Vec::<RouteEntry>::with_capacity(routing_table.size());
+
+            // process each entry
+            for entry in msg.entries {
+                // first, validate each entry
+                match validate_entry(&entry) {
+                    Ok(_) => println!("Current entry: {:?}", entry),
+                    Err(e) => {
+                        println!("{}", e);
+                        continue;
+                    }
+                }
+                // final destination address of this entry
+                let dst_addr = Ipv4Addr::from(entry.address);
+                // if valid, update metric
+                let new_metric = min(entry.cost + 1, INFINITY);
+
+                // if no explicit route:
+                if !routing_table.has_dst(&dst_addr) {
+                    // if not infinity, add to routing table
+                    if new_metric < INFINITY {
+                        let new_route = Route {
+                            dst_addr,
+                            next_hop: gateway_addr,
+                            cost: new_metric,
+                            changed: true,
+                            mask: INIT_MASK,
+                        };
+                        routing_table.insert(new_route);
+                    }
+                } else {
+                    let mut route = routing_table.get_route(&dst_addr);
+                    // otherwise, if (metrics diff and E's src addr == next hop addr) OR (new
+                    // metric < curr metric)
+                    if (new_metric != route.cost && route.next_hop == gateway_addr)
+                        || (new_metric < route.cost)
+                    {
+                        // set metric, and update next hop
+                        route.cost = new_metric;
+                        route.next_hop = gateway_addr;
+                        // mark as changed
+                        route.changed = true;
+
+                        // if metric is infinity, delete from table
+                        if new_metric == INFINITY {
+                            // TODO: figure out deletion steps
+                        } else {
+                            // otherwise, update routing table
+                            routing_table.insert(route);
+                        }
+                    }
+                }
+            }
+
+            println!("\n");
         }
 
         Ok(())
     }))
 }
-// pub type Handler = Arc<Mutex<dyn FnMut(IPPacket) -> Result<()> + Send>>;
-
-// pub fn rip_handler(packet: IPPacket) -> Result<(), Error> {
-// // get source IP address
-// let src_addr = Ipv4Addr::from(packet.header.source);
-
-// println!("In RIP handler; packet from {}...", src_addr);
-
-// let node = node.lock().unwrap();
-// // check that source addr is one of the destination addresses
-// let src_if_index = in_interfaces(&src_addr, &node.interfaces);
-
-// println!("src if index: {}", src_if_index);
-
-// if src_if_index < 0 {
-// return Err(Error::new(
-// ErrorKind::Other,
-// "Source address not from reachable interface!",
-// ));
-// }
-// let src_if_index = src_if_index as usize;
-
-// // first, attempt to parse into rip message
-// let msg = recv_rip_message(&packet)?;
-
-// println!("RIP Message: {:?}", msg);
-
-// // Handle Request
-// if msg.command == RIP_REQUEST {
-// match msg.num_entries {
-// // if no entries, do nothing
-// 0 => return Ok(()),
-// // if 1 entry, check that entry is default
-// 1 => {
-// if msg.entries[0] != RouteEntry::DUMMY_ROUTE {
-// return Err(Error::new(
-// ErrorKind::Other,
-// "RIP requests must have 1 entry with a default route.",
-// ));
-// }
-
-// println!("in here 1");
-
-// // for each entry in the routing table, add to RIP message
-// let mut entries: Vec<RouteEntry> =
-// Vec::<RouteEntry>::with_capacity(node.routing_table.size());
-// for (dst_addr, entry) in node.routing_table.iter() {
-// println!("in here 2");
-
-// // if next hop is same as source, poison it
-// let cost = if entry.next_hop == src_addr {
-// INFINITY
-// } else {
-// entry.cost as u32
-// };
-
-// // turn entry into route
-// let route_entry = RouteEntry {
-// cost,
-// address: u32::from_be_bytes(dst_addr.octets()),
-// mask: entry.mask,
-// };
-
-// entries.push(route_entry);
-// }
-// // make new RIP message
-// let msg = RIPMessage {
-// command: RIP_RESPONSE,
-// num_entries: entries.len() as u16,
-// entries,
-// };
-
-// println!("Sending {:?}...", msg);
-
-// // send message response!
-// return send_rip_message(&node.interfaces[src_if_index], msg);
-// }
-// // if more than 1 entry, do nothing
-// _ => {
-// return Err(Error::new(
-// ErrorKind::Other,
-// "RIP requests with more than 1 entry are not currently supported.",
-// ))
-// }
-// }
-// } else if msg.command == RIP_RESPONSE {
-// return Ok(());
-// }
-
-// Ok(())
-// }

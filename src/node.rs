@@ -153,12 +153,14 @@ impl Node {
                 let mut handlers = node.handlers.lock().unwrap();
                 handlers.insert(200, Arc::clone(&default_handlers[0]));
                 mem::drop(handlers);
-                thread::sleep(std::time::Duration::from_secs(2));
+                thread::sleep(std::time::Duration::from_secs(3));
 
                 // Send RIP Request to each of its net interfaces (i.e. neighbors)
                 for dest_if in &*interfaces {
-                    let initial_route = RouteEntry::DUMMY_ROUTE;
-                    let rip_msg = RIPMessage::new(RIP_REQUEST, 1, vec![initial_route]);
+                    // TODO: why not use dummy route? RFC says to do this
+                    // let initial_route = RouteEntry::DUMMY_ROUTE;
+                    // let rip_msg = RIPMessage::new(RIP_REQUEST, 1, vec![initial_route]);
+                    let rip_msg = RIPMessage::new(RIP_REQUEST, 0, vec![]);
                     send_rip_message(dest_if, rip_msg)?;
                 }
 
@@ -260,12 +262,12 @@ impl Node {
     pub fn fmt_routes(&self) -> String {
         let mut res = String::new();
         res.push_str("cost\tdst\t\tloc\n");
-        let interfaces = self.interfaces.lock().unwrap();
+        // let interfaces = self.interfaces.lock().unwrap();
         let routing_table = self.routing_table.lock().unwrap();
 
         for (index, (_, route)) in routing_table.iter().enumerate() {
             res.push_str(&(format!("{}\t{}\t{}", route.cost, route.dst_addr, route.next_hop)));
-            if index != interfaces.len() - 1 {
+            if index != routing_table.size() - 1 {
                 res.push('\n');
             }
         }
