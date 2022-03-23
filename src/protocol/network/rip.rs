@@ -70,7 +70,7 @@ pub fn insert_route(routing_table: Arc<Mutex<RoutingTable>>, route: Route) {
  * - address: destination address
  * - mask: netmask; default is 255.255.255.255
  */
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RouteEntry {
     pub cost: u32,
     pub address: u32,
@@ -86,6 +86,14 @@ impl RouteEntry {
         address: 0,
         mask: INIT_MASK,
     };
+
+    pub fn new(cost: u32, address: u32) -> RouteEntry {
+        RouteEntry {
+            cost: cost,
+            address: address,
+            mask: INIT_MASK,
+        }
+    }
 
     /**
      * Converts RouteEntry into a vector of bytes.
@@ -124,7 +132,7 @@ impl RouteEntry {
  * - num_entries: number of RouteEntries
  * - entries: vector of entries
  */
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RIPMessage {
     command: u16,
     num_entries: u16,
