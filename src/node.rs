@@ -23,9 +23,6 @@ pub type Handler = Arc<Mutex<dyn FnMut(IPPacket) -> Result<()> + Send>>;
  * - handlers: table for registered handlers for different protocols.
  * - receiver: Receiver channel on which Senders send messages.
  */
-// pub struct Node<T>
-// where
-// T: FnMut(IPPacket) -> Result<(), Error>,
 pub struct Node {
     // interfaces: Vec<NetworkInterface>,
     // routing_table: RoutingTable,
@@ -35,9 +32,6 @@ pub struct Node {
     handlers: Arc<Mutex<HashMap<u8, Handler>>>,
 }
 
-// impl<T> Node<T>
-// where
-// T: FnMut(IPPacket) -> Result<(), Error>,
 impl Node {
     /**
      * Creates an empty node.
@@ -47,9 +41,6 @@ impl Node {
      */
     pub fn new_empty() -> Result<Node> {
         Ok(Node {
-            // interfaces: Vec::new(),
-            // routing_table: RoutingTable::new(),
-            // handlers: HashMap::new(),
             interfaces: Arc::new(Mutex::new(Vec::new())),
             routing_table: Arc::new(Mutex::new(RoutingTable::new())),
             handlers: Arc::new(Mutex::new(HashMap::new())),
@@ -70,10 +61,8 @@ impl Node {
         match read_lines(&linksfile) {
             // if successful, create initial node
             Ok(lines) => {
-                // let node = Arc::new(Mutex::new(Node::new_empty()?));
                 let node = Node::new_empty()?;
 
-                // let mut node_guard = node.lock().unwrap();
                 let mut interfaces = node.interfaces.lock().unwrap();
                 // store src socket; shared across all interfaces
                 let mut src_sock: Option<UdpSocket> = None;
@@ -111,13 +100,6 @@ impl Node {
                         }
 
                         // insert into routing table
-                        // routing_table.insert(Route {
-                        // dst_addr: src_addr,
-                        // next_hop: src_addr,
-                        // cost: 0,
-                        // changed: false,
-                        // mask: INIT_MASK,
-                        // });
                         insert_route(
                             Arc::clone(&node.routing_table),
                             Route {
@@ -158,9 +140,6 @@ impl Node {
 
                 // Send RIP Request to each of its net interfaces (i.e. neighbors)
                 for dest_if in &*interfaces {
-                    // TODO: why not use dummy route? RFC says to do this
-                    // let initial_route = RouteEntry::DUMMY_ROUTE;
-                    // let rip_msg = RIPMessage::new(RIP_REQUEST, 1, vec![initial_route]);
                     let rip_msg = RIPMessage::new(RIP_REQUEST, 0, vec![]);
                     send_rip_message(dest_if, rip_msg)?;
                 }
@@ -168,15 +147,13 @@ impl Node {
                 // Finally, infinitely process incoming messages
                 // TODO: store result somewhere
                 let handlers = Arc::clone(&node.handlers);
-                // let node_cp = Arc::clone(&node);
                 thread::spawn(move || {
                     for packet in rx {
                         let protocol = packet.header.protocol;
-                        // let node = node_cp.lock().unwrap();
                         let handlers = handlers.lock().unwrap();
                         if handlers.contains_key(&protocol) {
                             let mut handler = handlers[&protocol].lock().unwrap();
-                            match (handler)(packet) {
+                            match handler(packet) {
                                 Ok(()) => (),
                                 Err(e) => println!("{}", e),
                             }
@@ -185,7 +162,6 @@ impl Node {
                 });
 
                 // unlock before returning to prevent borrow checker from complaining
-                // mem::drop(node_guard);
                 mem::drop(interfaces);
 
                 Ok(node)
@@ -197,17 +173,6 @@ impl Node {
             )),
         }
     }
-
-    /**
-     * Register handler for a specific protocol.
-     *
-     * Inputs:
-     * - protocol: the protocol for which a handler should be registered
-     * - handler: the handler for the specific protocol.
-     */
-    // pub fn register_handler(&mut self, protocol: u8, handler: Handler) {
-    // self.handlers.insert(protocol, handler);
-    // }
 
     /**
      * Register handler for a specific protocol.

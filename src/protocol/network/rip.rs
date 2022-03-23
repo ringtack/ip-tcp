@@ -341,13 +341,13 @@ pub fn make_rip_handler(
         let interfaces = interfaces.lock().unwrap();
 
         // get source (opposite IP) and gateway IP address (this is the destination of the packet!)
-        let source_addr = Ipv4Addr::from(packet.header.source);
+        let remote_addr = Ipv4Addr::from(packet.header.source);
         let gateway_addr = Ipv4Addr::from(packet.header.destination);
 
-        println!("Source: {}\tGateway: {}", source_addr, gateway_addr);
+        println!("Remote: {}\tGateway: {}", remote_addr, gateway_addr);
 
         // check that source addr is one of the destination interfaces
-        let src_if_index = in_interfaces(&source_addr, &*interfaces);
+        let src_if_index = in_interfaces(&remote_addr, &*interfaces);
         if src_if_index < 0 {
             return Err(Error::new(
                 ErrorKind::Other,
@@ -366,14 +366,6 @@ pub fn make_rip_handler(
             match msg.num_entries {
                 // if no entries, send response
                 0 => {
-                    // TODO: this is how the RFC does it...
-                    // if msg.entries[0] != RouteEntry::DUMMY_ROUTE {
-                    // return Err(Error::new(
-                    // ErrorKind::Other,
-                    // "RIP requests must have 1 entry with a default route.",
-                    // ));
-                    // }
-
                     let routing_table = routing_table.lock().unwrap();
                     // for each entry in the routing table, add to RIP message
                     let mut entries: Vec<RouteEntry> =
@@ -381,7 +373,7 @@ pub fn make_rip_handler(
 
                     // for each route, process it (SH w/ PR) then add to entries
                     for (dst_addr, route) in routing_table.iter() {
-                        let route_entry = process_route(&source_addr, dst_addr, route)?;
+                        let route_entry = process_route(&remote_addr, dst_addr, route)?;
                         entries.push(route_entry);
                     }
 
@@ -404,10 +396,8 @@ pub fn make_rip_handler(
                 }
             }
         } else if msg.command == RIP_RESPONSE {
-            let mut routing_table = routing_table.lock().unwrap();
             // for each entry in the routing table, add to RIP message
-            // let mut entries: Vec<RouteEntry> =
-            // Vec::<RouteEntry>::with_capacity(routing_table.size());
+            let mut routing_table = routing_table.lock().unwrap();
 
             // process each entry
             for entry in msg.entries {
@@ -431,7 +421,7 @@ pub fn make_rip_handler(
                         let new_route = Route {
                             dst_addr,
                             gateway: gateway_addr,
-                            next_hop: source_addr,
+                            next_hop: remote_addr,
                             cost: new_metric,
                             changed: true,
                             mask: INIT_MASK,
@@ -442,12 +432,12 @@ pub fn make_rip_handler(
                     let mut route = routing_table.get_route(&dst_addr);
                     // otherwise, if (metrics diff and E's src addr == next hop addr) OR (new
                     // metric < curr metric)
-                    if (new_metric != route.cost && route.next_hop == source_addr)
+                    if (new_metric != route.cost && route.next_hop == remote_addr)
                         || (new_metric < route.cost)
                     {
                         // set metric, and update next hop
                         route.cost = new_metric;
-                        route.next_hop = source_addr;
+                        route.next_hop = remote_addr;
                         // mark as changed
                         route.changed = true;
 
