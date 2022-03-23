@@ -116,7 +116,7 @@ impl Node {
                                 changed: false,
                                 mask: INIT_MASK,
                             },
-                        )
+                        )?;
                     }
                 }
 

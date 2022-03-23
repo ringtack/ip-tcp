@@ -3,6 +3,7 @@ use byteorder::*;
 use std::cmp::min;
 use std::collections::hash_map::Iter;
 use std::collections::HashMap;
+use std::fmt::{self, Display};
 use std::io::{Error, ErrorKind, Result};
 use std::mem;
 use std::net::Ipv4Addr;
@@ -80,8 +81,14 @@ impl RoutingTable {
         self.routes[dst_addr]
     }
 
-    pub fn insert(&mut self, route: Route) {
-        self.routes.insert(route.dst_addr, route);
+    pub fn insert(&mut self, route: Route) -> Result<()> {
+        match self.size() < MAX_ROUTES {
+            true => {
+                self.routes.insert(route.dst_addr, route);
+                Ok(())
+            }
+            false => Err(Error::new(ErrorKind::Other, "Too many routes.")),
+        }
     }
 
     pub fn delete(&mut self, dst_addr: &Ipv4Addr) {
@@ -96,9 +103,9 @@ impl RoutingTable {
 /**
  * Wrapper function to concurrently insert (update) route from routing table.
  */
-pub fn insert_route(routing_table: Arc<Mutex<RoutingTable>>, route: Route) {
+pub fn insert_route(routing_table: Arc<Mutex<RoutingTable>>, route: Route) -> Result<()> {
     let mut rt = routing_table.lock().unwrap();
-    rt.insert(route);
+    rt.insert(route)
 }
 
 /**
@@ -114,6 +121,18 @@ pub struct RouteEntry {
     pub cost: u32,
     pub address: u32,
     pub mask: u32,
+}
+
+impl Display for RouteEntry {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "[Cost: {}, Address: {}, Mask: {}]",
+            self.cost,
+            Ipv4Addr::from(self.address),
+            Ipv4Addr::from(self.mask)
+        )
+    }
 }
 
 impl RouteEntry {
@@ -168,6 +187,22 @@ pub struct RIPMessage {
     pub command: u16,
     pub num_entries: u16,
     pub entries: Vec<RouteEntry>,
+}
+
+impl Display for RIPMessage {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // collect entries
+        let mut entries_str = String::new();
+        for entry in &self.entries {
+            entries_str.push_str(&entry.to_string());
+        }
+
+        write!(
+            f,
+            "[Command: {}, Num Entries: {}, Entries: {{{}}}]",
+            self.command, self.num_entries, entries_str
+        )
+    }
 }
 
 impl RIPMessage {
@@ -309,21 +344,21 @@ pub fn validate_entry(entry: &RouteEntry) -> Result<()> {
     Ok(())
 }
 
-/**
+/*
  * Find remote IP address of a gateway IP address.
  */
-fn get_end_addr(interfaces: &[NetworkInterface], gateway_addr: &Ipv4Addr) -> Option<Ipv4Addr> {
-    let mut end_addr = None;
+// fn get_end_addr(interfaces: &[NetworkInterface], gateway_addr: &Ipv4Addr) -> Option<Ipv4Addr> {
+// let mut end_addr = None;
 
-    for net_if in interfaces {
-        if net_if.src_addr == *gateway_addr {
-            end_addr = Some(net_if.dst_addr);
-            break;
-        }
-    }
+// for net_if in interfaces {
+// if net_if.src_addr == *gateway_addr {
+// end_addr = Some(net_if.dst_addr);
+// break;
+// }
+// }
 
-    end_addr
-}
+// end_addr
+// }
 
 /**
  * Converts a route in the RoutingTable into a RouteEntry for RIPMessages.
@@ -382,6 +417,8 @@ pub fn make_rip_handler(
 
         // first, attempt to parse into rip message; validates that protocol is right
         let msg = recv_rip_message(&packet)?;
+
+        println!("RIP Message: {}", msg);
 
         // lock routing table; may need to process
         let mut routing_table = routing_table.lock().unwrap();
@@ -450,7 +487,7 @@ pub fn make_rip_handler(
                             cost: new_metric,
                             changed: true,
                             mask: INIT_MASK,
-                        });
+                        })?;
                     }
                     // TODO: notify that a change has happened
                 } else {
@@ -475,7 +512,7 @@ pub fn make_rip_handler(
                             // should just need to signal triggered updates; should let that remove
                         } else {
                             // otherwise, update routing table
-                            routing_table.insert(route);
+                            routing_table.insert(route)?;
                         }
                     }
                 }
