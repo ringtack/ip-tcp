@@ -6,7 +6,9 @@ use node::Node;
 extern crate shrust;
 use shrust::{Shell, ShellIO};
 use std::io::{prelude::*, Error};
+use std::mem;
 use std::process;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::protocol::network::rip::*;
@@ -17,8 +19,9 @@ struct Args {
     linksfile: String,
 }
 
+// TODO: REMOVE THIS IS JUST A TEST
 fn rip_handler(packet: IPPacket) -> Result<(), Error> {
-    let msg = recv_rip_message(&packet)?;
+    let msg = recv_rip_message(&packet);
     println!("Message: {:?}", msg);
     Ok(())
 }
@@ -26,7 +29,7 @@ fn rip_handler(packet: IPPacket) -> Result<(), Error> {
 fn main() {
     let args = Args::parse();
     // Attempt to make a node
-    let mut node = match Node::new(args.linksfile) {
+    let mut node = match Node::new(args.linksfile, vec![Arc::new(Mutex::new(rip_handler))]) {
         Ok(node) => node,
         Err(e) => {
             eprintln!("{}", e);
@@ -34,7 +37,10 @@ fn main() {
         }
     };
 
-    // register_handler(RIP_PROTOCOL, rip_handler);
+    node.register_handler(
+        RIP_PROTOCOL,
+        make_rip_handler(node.get_interfaces(), node.get_routing_table()),
+    );
 
     let mut shell = Shell::new(node);
     shell.new_command_noargs("help", "Print this list of commands", |io, _| {
@@ -51,11 +57,13 @@ fn main() {
         "interfaces",
         "Print information about each interface, one per line",
         |io, node| {
+            // let node = node.lock().unwrap();
             writeln!(io, "{}", node.fmt_interfaces())?;
             Ok(())
         },
     );
     shell.new_command_noargs("li", "See interfaces", |io, node| {
+        // let node = node.lock().unwrap();
         writeln!(io, "{}", node.fmt_interfaces())?;
         Ok(())
     });
@@ -64,12 +72,14 @@ fn main() {
         "routes",
         "Print information about the route to each known destination, one per line",
         |io, node| {
+            // let node = node.lock().unwrap();
             writeln!(io, "{}", node.fmt_routes())?;
             Ok(())
         },
     );
 
     shell.new_command_noargs("lr", "See routes", |io, node| {
+        // let node = node.lock().unwrap();
         writeln!(io, "{}", node.fmt_routes())?;
         Ok(())
     });
@@ -79,6 +89,7 @@ fn main() {
     });
 
     shell.new_command("down", "Bring an interface “down”", 1, |io, node, s| {
+        // let mut node = node.lock().unwrap();
         match s[0].parse::<isize>() {
             Ok(id) => match node.interface_link_down(id) {
                 Err(err) => {
@@ -94,6 +105,7 @@ fn main() {
     });
 
     shell.new_command("up", "Bring an interface “up”", 1, |io, node, s| {
+        // let mut node = node.lock().unwrap();
         match s[0].parse::<isize>() {
             Ok(id) => match node.interface_link_up(id) {
                 Err(err) => {

@@ -3,7 +3,7 @@ use crate::protocol::network::{IPPacket, NetworkInterface};
 use std::{
     collections::HashMap,
     fs::File,
-    io::{self, BufRead, Error, ErrorKind},
+    io::{self, BufRead, Error, ErrorKind, Result},
     mem,
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     path::Path,
@@ -11,14 +11,7 @@ use std::{
     thread,
 };
 
-pub type Handler = fn(IPPacket) -> Result<(), Error>;
-
-// TODO: REMOVE THIS IS JUST A TEST
-fn rip_handler(packet: IPPacket) -> Result<(), Error> {
-    let msg = recv_rip_message(&packet)?;
-    println!("Message: {:?}", msg);
-    Ok(())
-}
+pub type Handler = Arc<Mutex<dyn FnMut(IPPacket) -> Result<()> + Send>>;
 
 /**
  * Structure for a Node on the Network.
@@ -30,12 +23,21 @@ fn rip_handler(packet: IPPacket) -> Result<(), Error> {
  * - handlers: table for registered handlers for different protocols.
  * - receiver: Receiver channel on which Senders send messages.
  */
+// pub struct Node<T>
+// where
+// T: FnMut(IPPacket) -> Result<(), Error>,
 pub struct Node {
+    // interfaces: Vec<NetworkInterface>,
+    // routing_table: RoutingTable,
+    // handlers: HashMap<u8, Handler>,
     interfaces: Arc<Mutex<Vec<NetworkInterface>>>,
     routing_table: Arc<Mutex<RoutingTable>>,
     handlers: Arc<Mutex<HashMap<u8, Handler>>>,
 }
 
+// impl<T> Node<T>
+// where
+// T: FnMut(IPPacket) -> Result<(), Error>,
 impl Node {
     /**
      * Creates an empty node.
@@ -43,8 +45,11 @@ impl Node {
      * Returns:
      * - A Result<Node, Error> with a default node, or error.
      */
-    pub fn new_empty() -> Result<Node, Error> {
+    pub fn new_empty() -> Result<Node> {
         Ok(Node {
+            // interfaces: Vec::new(),
+            // routing_table: RoutingTable::new(),
+            // handlers: HashMap::new(),
             interfaces: Arc::new(Mutex::new(Vec::new())),
             routing_table: Arc::new(Mutex::new(RoutingTable::new())),
             handlers: Arc::new(Mutex::new(HashMap::new())),
@@ -60,13 +65,15 @@ impl Node {
      * Returns:
      * - A Result<Node, Error> with the node configuration specified in the link file, or error.
      */
-    pub fn new(linksfile: String) -> Result<Node, Error> {
+    pub fn new(linksfile: String, default_handlers: Vec<Handler>) -> Result<Node> {
         // Attempt to parse the linksfile
         match read_lines(&linksfile) {
             // if successful, create initial node
             Ok(lines) => {
+                // let node = Arc::new(Mutex::new(Node::new_empty()?));
                 let node = Node::new_empty()?;
 
+                // let mut node_guard = node.lock().unwrap();
                 let mut interfaces = node.interfaces.lock().unwrap();
                 // store src socket; shared across all interfaces
                 let mut src_sock: Option<UdpSocket> = None;
@@ -104,6 +111,13 @@ impl Node {
                         }
 
                         // insert into routing table
+                        // routing_table.insert(Route {
+                        // dst_addr: src_addr,
+                        // next_hop: src_addr,
+                        // cost: 0,
+                        // changed: false,
+                        // mask: INIT_MASK,
+                        // });
                         insert_route(
                             Arc::clone(&node.routing_table),
                             Route {
@@ -111,21 +125,10 @@ impl Node {
                                 next_hop: src_addr,
                                 cost: 0,
                                 changed: false,
+                                mask: INIT_MASK,
                             },
                         )
                     }
-                }
-
-                // TODO: REMOVE THIS IS JUST A TEST
-                register_handler(Arc::clone(&node.handlers), 200, rip_handler);
-
-                thread::sleep(std::time::Duration::from_secs(2));
-
-                // Send RIP Request to each of its net interfaces (i.e. neighbors)
-                for dest_if in &*interfaces {
-                    let initial_route = RouteEntry::DUMMY_ROUTE;
-                    let rip_msg = RIPMessage::new(RIP_REQUEST, 1, vec![initial_route]);
-                    send_rip_message(dest_if, rip_msg)?;
                 }
 
                 // Initiate thread to listen for incoming packets
@@ -146,20 +149,40 @@ impl Node {
                     });
                 }
 
+                // TODO: REMOVE THIS IS JUST A TEST
+                let mut handlers = node.handlers.lock().unwrap();
+                handlers.insert(200, Arc::clone(&default_handlers[0]));
+                mem::drop(handlers);
+                thread::sleep(std::time::Duration::from_secs(2));
+
+                // Send RIP Request to each of its net interfaces (i.e. neighbors)
+                for dest_if in &*interfaces {
+                    let initial_route = RouteEntry::DUMMY_ROUTE;
+                    let rip_msg = RIPMessage::new(RIP_REQUEST, 1, vec![initial_route]);
+                    send_rip_message(dest_if, rip_msg)?;
+                }
+
                 // Finally, infinitely process incoming messages
                 // TODO: store result somewhere
                 let handlers = Arc::clone(&node.handlers);
+                // let node_cp = Arc::clone(&node);
                 thread::spawn(move || {
                     for packet in rx {
                         let protocol = packet.header.protocol;
-                        let curr_handlers = handlers.lock().unwrap();
-                        if curr_handlers.contains_key(&protocol) {
-                            (curr_handlers[&protocol])(packet);
+                        // let node = node_cp.lock().unwrap();
+                        let handlers = handlers.lock().unwrap();
+                        if handlers.contains_key(&protocol) {
+                            let mut handler = handlers[&protocol].lock().unwrap();
+                            match (handler)(packet) {
+                                Ok(()) => (),
+                                Err(e) => println!("{}", e),
+                            }
                         }
                     }
                 });
 
                 // unlock before returning to prevent borrow checker from complaining
+                // mem::drop(node_guard);
                 mem::drop(interfaces);
 
                 Ok(node)
@@ -172,21 +195,40 @@ impl Node {
         }
     }
 
-    // pub fn listen_for_messages(&self) -> Result<(), Error> {
-    // // TODO: error handling
-    // thread::spawn(move || {
-    // if let Some(rx) = &self.receiver {
-    // for packet in rx {
-    // let protocol = packet.header.protocol;
-    // if self.handlers.contains_key(&protocol) {
-    // (self.handlers[&protocol])(packet);
+    /**
+     * Register handler for a specific protocol.
+     *
+     * Inputs:
+     * - protocol: the protocol for which a handler should be registered
+     * - handler: the handler for the specific protocol.
+     */
+    // pub fn register_handler(&mut self, protocol: u8, handler: Handler) {
+    // self.handlers.insert(protocol, handler);
     // }
-    // }
-    // }
-    // });
 
-    // Ok(())
-    // }
+    /**
+     * Register handler for a specific protocol.
+     *
+     * Inputs:
+     * - protocol: the protocol for which a handler should be registered
+     * - handler: the handler for the specific protocol.
+     */
+    pub fn register_handler(&self, protocol: u8, handler: Handler) {
+        let mut handlers = self.handlers.lock().unwrap();
+        handlers.insert(protocol, handler);
+    }
+
+    pub fn get_interfaces(&self) -> Arc<Mutex<Vec<NetworkInterface>>> {
+        Arc::clone(&self.interfaces)
+    }
+
+    pub fn get_routing_table(&self) -> Arc<Mutex<RoutingTable>> {
+        Arc::clone(&self.routing_table)
+    }
+
+    pub fn get_handlers(&self) -> Arc<Mutex<HashMap<u8, Handler>>> {
+        Arc::clone(&self.handlers)
+    }
 
     /**
      * Converts network interfaces into a human-readable string.
@@ -233,7 +275,7 @@ impl Node {
     /**
      * Bring the link of an interface "down"
      */
-    pub fn interface_link_down(&mut self, id: isize) -> Result<(), Error> {
+    pub fn interface_link_down(&mut self, id: isize) -> Result<()> {
         let mut interfaces = self.interfaces.lock().unwrap();
         if id < 0 || id as usize >= interfaces.len() {
             return Err(Error::new(
@@ -259,7 +301,7 @@ impl Node {
     /**
      * Bring the link of an interface "up"
      */
-    pub fn interface_link_up(&mut self, id: isize) -> Result<(), Error> {
+    pub fn interface_link_up(&mut self, id: isize) -> Result<()> {
         let mut interfaces = self.interfaces.lock().unwrap();
 
         if id < 0 || id as usize >= interfaces.len() {
@@ -285,22 +327,6 @@ impl Node {
 }
 
 /**
- * Register handler for a specific protocol.
- *
- * Inputs:
- * - protocol: the protocol for which a handler should be registered
- * - handler: the handler for the specific protocol.
- */
-pub fn register_handler(
-    handlers: Arc<Mutex<HashMap<u8, Handler>>>,
-    protocol: u8,
-    handler: Handler,
-) {
-    let mut handlers = handlers.lock().unwrap();
-    handlers.insert(protocol, handler);
-}
-
-/**
  * Helper function to read all lines of a file specified by the path filename.
  */
 fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
@@ -322,3 +348,93 @@ fn str_2_ipv4(s: &str) -> Ipv4Addr {
         Ipv4Addr::new(s[0], s[1], s[2], s[3])
     }
 }
+
+// pub fn rip_handler(node: Arc<Mutex<Node>>, packet: IPPacket) -> Result<(), Error> {
+// // get source IP address
+// let src_addr = Ipv4Addr::from(packet.header.source);
+
+// println!("In RIP handler; packet from {}...", src_addr);
+
+// let node = node.lock().unwrap();
+// // check that source addr is one of the destination addresses
+// let src_if_index = in_interfaces(&src_addr, &node.interfaces);
+
+// println!("src if index: {}", src_if_index);
+
+// if src_if_index < 0 {
+// return Err(Error::new(
+// ErrorKind::Other,
+// "Source address not from reachable interface!",
+// ));
+// }
+// let src_if_index = src_if_index as usize;
+
+// // first, attempt to parse into rip message
+// let msg = recv_rip_message(&packet)?;
+
+// println!("RIP Message: {:?}", msg);
+
+// // Handle Request
+// if msg.command == RIP_REQUEST {
+// match msg.num_entries {
+// // if no entries, do nothing
+// 0 => return Ok(()),
+// // if 1 entry, check that entry is default
+// 1 => {
+// if msg.entries[0] != RouteEntry::DUMMY_ROUTE {
+// return Err(Error::new(
+// ErrorKind::Other,
+// "RIP requests must have 1 entry with a default route.",
+// ));
+// }
+
+// println!("in here 1");
+
+// // for each entry in the routing table, add to RIP message
+// let mut entries: Vec<RouteEntry> =
+// Vec::<RouteEntry>::with_capacity(node.routing_table.size());
+// for (dst_addr, entry) in node.routing_table.iter() {
+// println!("in here 2");
+
+// // if next hop is same as source, poison it
+// let cost = if entry.next_hop == src_addr {
+// INFINITY
+// } else {
+// entry.cost as u32
+// };
+
+// // turn entry into route
+// let route_entry = RouteEntry {
+// cost,
+// address: u32::from_be_bytes(dst_addr.octets()),
+// mask: entry.mask,
+// };
+
+// entries.push(route_entry);
+// }
+// // make new RIP message
+// let msg = RIPMessage {
+// command: RIP_RESPONSE,
+// num_entries: entries.len() as u16,
+// entries,
+// };
+
+// println!("Sending {:?}...", msg);
+
+// // send message response!
+// return send_rip_message(&node.interfaces[src_if_index], msg);
+// }
+// // if more than 1 entry, do nothing
+// _ => {
+// return Err(Error::new(
+// ErrorKind::Other,
+// "RIP requests with more than 1 entry are not currently supported.",
+// ))
+// }
+// }
+// } else if msg.command == RIP_RESPONSE {
+// return Ok(());
+// }
+
+// Ok(())
+// }
