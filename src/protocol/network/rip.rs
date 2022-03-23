@@ -61,6 +61,7 @@ impl RoutingTable {
  * - address: destination address
  * - mask: netmask; default is 255.255.255.255
  */
+#[derive(Debug)]
 pub struct RouteEntry {
     pub cost: u32,
     pub address: u32,
@@ -114,6 +115,7 @@ impl RouteEntry {
  * - num_entries: number of RouteEntries
  * - entries: vector of entries
  */
+#[derive(Debug)]
 pub struct RIPMessage {
     command: u16,
     num_entries: u16,
@@ -203,7 +205,7 @@ pub fn recv_rip_message(packet: &IPPacket) -> Result<RIPMessage, Error> {
     // create RIP message
     let msg = RIPMessage::from_bytes(packet.payload.as_slice())?;
     // validate command
-    if msg.command != RIP_REQUEST || msg.command != RIP_RESPONSE {
+    if msg.command != RIP_REQUEST && msg.command != RIP_RESPONSE {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             "Invalid command! Must be 1 (request) or 2 (response)",

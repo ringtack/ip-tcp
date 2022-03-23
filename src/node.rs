@@ -1,11 +1,10 @@
-use crate::protocol::link::LinkInterface;
 use crate::protocol::network::rip::*;
 use crate::protocol::network::{IPPacket, NetworkInterface};
 use std::{
     collections::HashMap,
     fs::File,
     io::{self, BufRead, Error, ErrorKind},
-    net::{Ipv4Addr, SocketAddrV4},
+    net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     path::Path,
     sync::mpsc::{channel, Receiver, Sender},
     thread,
@@ -17,12 +16,13 @@ pub type Handler = fn(IPPacket) -> Result<(), Error>;
  * Structure for a Node on the Network.
  *
  * Fields:
- * - src_link: the link interface of the current node. Same for all interfaces.
- * - interfaces: network interfaces for each of the node's connections.
+ * - interfaces: network interfaces for each of the node's connections. All share the same source
+ * socket.
  * - routing_table: dynamically updating table for routes.
+ * - handlers: table for registered handlers for different protocols.
+ * - receiver: Receiver channel on which Senders send messages.
  */
 pub struct Node {
-    src_link: LinkInterface,
     interfaces: Vec<NetworkInterface>,
     routing_table: RoutingTable,
     handlers: HashMap<u8, Handler>,
@@ -38,7 +38,7 @@ impl Node {
      */
     pub fn new_empty() -> Result<Node, Error> {
         Ok(Node {
-            src_link: LinkInterface::new(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?,
+            // src_link: LinkInterface::new(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?,
             interfaces: Vec::new(),
             routing_table: RoutingTable::new(),
             handlers: HashMap::new(),
@@ -61,6 +61,9 @@ impl Node {
             // if successful, create initial node
             Ok(lines) => {
                 let mut node = Node::new_empty()?;
+                // store src socket; shared across all interfaces
+                let mut src_sock: Option<UdpSocket> = None;
+
                 // iterate through every line
                 for (index, line) in lines.enumerate() {
                     if let Ok(line) = line {
@@ -71,7 +74,10 @@ impl Node {
 
                         // if first line, is source "L2 address"
                         if index == 0 {
-                            node.src_link = LinkInterface::new(sock_addr)?;
+                            // Create socket on which node will listen
+                            println!("[Node::new] Listening on {}...", sock_addr);
+
+                            src_sock = Some(UdpSocket::bind(sock_addr)?);
                             continue;
                         }
 
@@ -79,13 +85,17 @@ impl Node {
                         //      <Dest L2 Address> <Dest L2 Port> <Src IF> <Dest IF>
                         let src_addr = str_2_ipv4(line[2]);
                         let dest_addr = str_2_ipv4(line[3]);
-                        node.interfaces.push(NetworkInterface::new(
-                            (index - 1) as u8,
-                            src_addr,
-                            node.src_link.clone(),
-                            dest_addr,
-                            sock_addr,
-                        )?);
+
+                        if let Some(sock) = &src_sock {
+                            node.interfaces.push(NetworkInterface::new(
+                                (index - 1) as u8,
+                                src_addr,
+                                dest_addr,
+                                sock,
+                                sock_addr,
+                            )?);
+                        }
+
                         // insert into routing table
                         node.routing_table.insert(Route {
                             dst_addr: src_addr,
@@ -99,7 +109,7 @@ impl Node {
                 // Send RIP Request to each of its net interfaces (i.e. neighbors)
                 for dest_if in &node.interfaces {
                     let initial_route = RouteEntry::DUMMY_ROUTE;
-                    let rip_msg = RIPMessage::new(1, 1, vec![initial_route]);
+                    let rip_msg = RIPMessage::new(RIP_REQUEST, 1, vec![initial_route]);
                     send_rip_message(dest_if, rip_msg)?;
                 }
 
@@ -125,6 +135,7 @@ impl Node {
 
                 Ok(node)
             }
+            // otherwise, parsing error, so throw error
             Err(_) => Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!("invalid linksfile path: {}", linksfile),
@@ -133,19 +144,23 @@ impl Node {
     }
 
     /**
-     * Tell Node to process receiving messages.
+     * Tell Node to process incoming messages.
      */
-    fn listen_for_messages(&self) {
+    pub fn listen_for_messages(&self) -> Result<(), Error> {
         // TODO: error handling
         if let Some(rx) = &self.receiver {
             for packet in rx {
-                let packet: IPPacket = packet;
                 let protocol = packet.header.protocol;
                 if self.handlers.contains_key(&protocol) {
-                    (self.handlers[&protocol])(packet);
+                    match (self.handlers[&protocol])(packet) {
+                        Ok(()) => (),
+                        Err(e) => return Err(Error::new(ErrorKind::Other, e.to_string())),
+                    }
                 }
             }
         }
+
+        Ok(())
     }
 
     /**
@@ -166,7 +181,7 @@ impl Node {
         let mut res = String::new();
         res.push_str("id\trem\t\tloc\n");
         for (index, interface) in self.interfaces.iter().enumerate() {
-            if !interface.dst_link.active {
+            if !interface.link_if.active {
                 continue;
             }
             res.push_str(
@@ -212,13 +227,13 @@ impl Node {
             ));
         }
         let id = id as usize;
-        if !self.interfaces[id].dst_link.active {
+        if !self.interfaces[id].link_if.active {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
                 format!("interface {} is down already", id),
             ));
         }
-        self.interfaces[id].dst_link.active = false;
+        self.interfaces[id].link_if.active = false;
         Ok(())
     }
 
@@ -237,13 +252,13 @@ impl Node {
             ));
         }
         let id = id as usize;
-        if self.interfaces[id].dst_link.active {
+        if self.interfaces[id].link_if.active {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
                 format!("interface {} is up already", id),
             ));
         }
-        self.interfaces[id].dst_link.active = true;
+        self.interfaces[id].link_if.active = true;
         Ok(())
     }
 }

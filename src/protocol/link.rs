@@ -1,5 +1,5 @@
-use std::io::{self, Error, ErrorKind};
-use std::net;
+use std::io::{Error, ErrorKind};
+use std::net::{SocketAddr::*, SocketAddrV4, UdpSocket};
 
 pub const MTU: usize = 1400;
 
@@ -7,13 +7,13 @@ pub const MTU: usize = 1400;
  * Struct representing a Link Interface.
  *
  * Fields:
- * - socket: UDP Socket abstraction representing the link
- * - socket_addr: Address of socket abstraction
+ * - src_link: UDP Socket abstraction representing the SOURCE LINK
+ * - dst_link_addr: "L2" (aka socket) address representing the DESTINATION LINK ADDRESS
  * - active: whether link interface is on or off
  */
 pub struct LinkInterface {
-    socket: net::UdpSocket,
-    socket_addr: net::SocketAddrV4,
+    src_link: UdpSocket,         // SOURCE SOCKET
+    dst_link_addr: SocketAddrV4, // DESTINATION ADDRESS
     pub active: bool,
 }
 
@@ -23,8 +23,8 @@ pub struct LinkInterface {
 impl Clone for LinkInterface {
     fn clone(&self) -> Self {
         LinkInterface {
-            socket: self.socket.try_clone().unwrap(),
-            socket_addr: self.socket_addr,
+            src_link: self.src_link.try_clone().unwrap(),
+            dst_link_addr: self.dst_link_addr,
             active: self.active,
         }
     }
@@ -34,13 +34,27 @@ impl LinkInterface {
     /**
      * Creates a new link interface, given a socket address.
      */
-    pub fn new(socket_addr: net::SocketAddrV4) -> Result<LinkInterface, Error> {
-        let link_interface = LinkInterface {
-            socket: net::UdpSocket::bind(socket_addr)?,
-            socket_addr,
+    // pub fn new(socket_addr: SocketAddrV4) -> Result<LinkInterface, Error> {
+    // println!("Binding to {}...", socket_addr);
+    // let link_interface = LinkInterface {
+    // socket: UdpSocket::bind(socket_addr)?,
+    // socket_addr,
+    // active: true,
+    // };
+    // Ok(link_interface)
+    // }
+
+    /**
+     * Creates a new link interface from a given source socket (SOURCE LINK) and socket address
+     * (DESTINATION LINK ADDR).
+     */
+    pub fn new(src_link: &UdpSocket, dst_addr: SocketAddrV4) -> Result<LinkInterface, Error> {
+        let src_link = src_link.try_clone()?;
+        Ok(LinkInterface {
+            src_link,
+            dst_link_addr: dst_addr,
             active: true,
-        };
-        Ok(link_interface)
+        })
     }
 
     /**
@@ -69,11 +83,11 @@ impl LinkInterface {
      */
     pub fn send_link_frame(
         &self,
-        dst_link: &LinkInterface,
+        // dst_link: &LinkInterface,
         payload: &[u8],
     ) -> Result<usize, Error> {
         // if either current or dest link is down, don't send
-        if !self.active || !dst_link.active {
+        if !self.active {
             return Err(Error::new(
                 ErrorKind::NotConnected,
                 "sending to unreachable address",
@@ -83,7 +97,10 @@ impl LinkInterface {
         if payload.len() > MTU {
             return Err(Error::new(ErrorKind::InvalidData, "payload too large"));
         }
-        self.socket.send_to(payload, dst_link.socket_addr)
+
+        println!("Sending frame to {}...", self.dst_link_addr);
+
+        self.src_link.send_to(payload, self.dst_link_addr)
     }
 
     /**
@@ -93,20 +110,22 @@ impl LinkInterface {
      * - A Result<(net::SocketAddr, [u8; MTU]), Error> of the source socket addr and payload, or an
      * error
      */
-    pub fn recv_link_frame(
-        &self,
-        payload: &mut [u8; MTU],
-    ) -> Result<(usize, net::SocketAddr), Error> {
+    pub fn recv_link_frame(&self, payload: &mut [u8; MTU]) -> Result<(usize, SocketAddrV4), Error> {
         // if locally not active, return an error
         if !self.active {
             return Err(Error::new(ErrorKind::NotConnected, "Link is down."));
         }
         // store payload
-        let (num_bytes, src_addr) = self.socket.recv_from(payload)?;
+        let (num_bytes, src_addr) = self.src_link.recv_from(payload)?;
         // if read more than MTU, return error
         if num_bytes > MTU {
             return Err(Error::new(ErrorKind::Other, "received too many bytes."));
         }
+        // coerce into SocketAddrV4
+        let src_addr = match src_addr {
+            V4(addr) => addr,
+            V6(_) => return Err(Error::new(ErrorKind::Other, "IPv6 not supported!")),
+        };
         Ok((num_bytes, src_addr))
     }
 }

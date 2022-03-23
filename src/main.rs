@@ -5,25 +5,39 @@ use clap::Parser;
 use node::Node;
 extern crate shrust;
 use shrust::{Shell, ShellIO};
-use std::io::prelude::*;
+use std::io::{prelude::*, Error};
 use std::process;
 use std::thread;
+
+use crate::protocol::network::rip::*;
+use crate::protocol::network::{IPPacket, RIP_PROTOCOL};
 
 #[derive(Parser)]
 struct Args {
     linksfile: String,
 }
 
+fn rip_handler(packet: IPPacket) -> Result<(), Error> {
+    let msg = recv_rip_message(&packet)?;
+    println!("Message: {:?}", msg);
+    Ok(())
+}
+
 fn main() {
     let args = Args::parse();
     // Attempt to make a node
-    let node = match Node::new(args.linksfile) {
+    let mut node = match Node::new(args.linksfile) {
         Ok(node) => node,
         Err(e) => {
             eprintln!("{}", e);
             process::exit(1);
         }
     };
+
+    node.register_handler(RIP_PROTOCOL, rip_handler);
+
+    // This hangs for now, need to spawn this off in a thread
+    node.listen_for_messages();
 
     let mut shell = Shell::new(node);
     shell.new_command_noargs("help", "Print this list of commands", |io, _| {

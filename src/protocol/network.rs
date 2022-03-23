@@ -3,7 +3,6 @@ use crate::protocol::link::{LinkInterface, MTU};
 use crate::protocol::network::rip::DEFAULT_TTL;
 use etherparse::{IpNumber, Ipv4Header};
 use std::{
-    collections::HashSet,
     io::{Error, ErrorKind},
     net,
 };
@@ -17,17 +16,15 @@ pub const RIP_PROTOCOL: u8 = 200;
  * Fields:
  * - id: the unique ID of this IF.
  * - src_addr: the IP address of the source IF.
- * - src_link: reference to the Node's link interface. SHOULD NOT CHANGE!
  * - dst_addr: the IP address of the dest IF.
- * - dst_link: the link interface of the destination.
+ * - link_if: the link interface of the destination.
  */
 #[derive(Clone)]
 pub struct NetworkInterface {
     pub id: u8,
     pub src_addr: net::Ipv4Addr,
-    pub src_link: LinkInterface,
     pub dst_addr: net::Ipv4Addr,
-    pub dst_link: LinkInterface,
+    pub link_if: LinkInterface,
 }
 
 /**
@@ -71,19 +68,28 @@ impl IPPacket {
 }
 
 impl NetworkInterface {
+    /**
+     * Creates a new Network Interface.
+     *
+     * Inputs:
+     * - id: unique id
+     * - src_addr: IP address of source IF
+     * - dst_addr: IP address of dest IF
+     * - src_sock: UdpSocket of source link. Used with dst_link to make LinkInterface.
+     * - dst_link: SocketAddrV4 of dst link
+     */
     pub fn new(
         id: u8,
         src_addr: net::Ipv4Addr,
-        src_link: LinkInterface,
         dst_addr: net::Ipv4Addr,
-        sock_addr: net::SocketAddrV4,
+        src_sock: &net::UdpSocket,
+        dst_link: net::SocketAddrV4,
     ) -> Result<NetworkInterface, Error> {
         let net_if = NetworkInterface {
             id,
             src_addr,
-            src_link,
             dst_addr,
-            dst_link: LinkInterface::new(sock_addr)?,
+            link_if: LinkInterface::new(src_sock, dst_link)?,
         };
         Ok(net_if)
     }
@@ -113,8 +119,8 @@ impl NetworkInterface {
 
         // combine into payload, and send
         let payload = [header_bytes.as_slice(), payload].concat();
-        self.src_link
-            .send_link_frame(&self.dst_link, payload.as_slice())?;
+
+        self.link_if.send_link_frame(payload.as_slice())?;
         Ok(())
     }
 
@@ -127,7 +133,7 @@ impl NetworkInterface {
     pub fn recv_ip(&self) -> Result<IPPacket, Error> {
         let mut buf: [u8; MTU] = [0; MTU];
         // get L2 payload
-        let (num_bytes, _) = self.src_link.recv_link_frame(&mut buf)?;
+        let (num_bytes, _) = self.link_if.recv_link_frame(&mut buf)?;
         // custom handling (since from_slice gives a weird error :/)
         match Ipv4Header::from_slice(&buf) {
             Ok((header, buf)) => {
