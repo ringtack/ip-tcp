@@ -122,6 +122,7 @@ impl Node {
                             Arc::clone(&node.routing_table),
                             Route {
                                 dst_addr: src_addr,
+                                gateway: src_addr,
                                 next_hop: src_addr,
                                 cost: 0,
                                 changed: false,
@@ -266,7 +267,7 @@ impl Node {
         let routing_table = self.routing_table.lock().unwrap();
 
         for (index, (_, route)) in routing_table.iter().enumerate() {
-            res.push_str(&(format!("{}\t{}\t{}", route.cost, route.dst_addr, route.next_hop)));
+            res.push_str(&(format!("{}\t{}\t{}", route.cost, route.dst_addr, route.gateway)));
             if index != routing_table.size() - 1 {
                 res.push('\n');
             }
@@ -350,93 +351,3 @@ fn str_2_ipv4(s: &str) -> Ipv4Addr {
         Ipv4Addr::new(s[0], s[1], s[2], s[3])
     }
 }
-
-// pub fn rip_handler(node: Arc<Mutex<Node>>, packet: IPPacket) -> Result<(), Error> {
-// // get source IP address
-// let src_addr = Ipv4Addr::from(packet.header.source);
-
-// println!("In RIP handler; packet from {}...", src_addr);
-
-// let node = node.lock().unwrap();
-// // check that source addr is one of the destination addresses
-// let src_if_index = in_interfaces(&src_addr, &node.interfaces);
-
-// println!("src if index: {}", src_if_index);
-
-// if src_if_index < 0 {
-// return Err(Error::new(
-// ErrorKind::Other,
-// "Source address not from reachable interface!",
-// ));
-// }
-// let src_if_index = src_if_index as usize;
-
-// // first, attempt to parse into rip message
-// let msg = recv_rip_message(&packet)?;
-
-// println!("RIP Message: {:?}", msg);
-
-// // Handle Request
-// if msg.command == RIP_REQUEST {
-// match msg.num_entries {
-// // if no entries, do nothing
-// 0 => return Ok(()),
-// // if 1 entry, check that entry is default
-// 1 => {
-// if msg.entries[0] != RouteEntry::DUMMY_ROUTE {
-// return Err(Error::new(
-// ErrorKind::Other,
-// "RIP requests must have 1 entry with a default route.",
-// ));
-// }
-
-// println!("in here 1");
-
-// // for each entry in the routing table, add to RIP message
-// let mut entries: Vec<RouteEntry> =
-// Vec::<RouteEntry>::with_capacity(node.routing_table.size());
-// for (dst_addr, entry) in node.routing_table.iter() {
-// println!("in here 2");
-
-// // if next hop is same as source, poison it
-// let cost = if entry.next_hop == src_addr {
-// INFINITY
-// } else {
-// entry.cost as u32
-// };
-
-// // turn entry into route
-// let route_entry = RouteEntry {
-// cost,
-// address: u32::from_be_bytes(dst_addr.octets()),
-// mask: entry.mask,
-// };
-
-// entries.push(route_entry);
-// }
-// // make new RIP message
-// let msg = RIPMessage {
-// command: RIP_RESPONSE,
-// num_entries: entries.len() as u16,
-// entries,
-// };
-
-// println!("Sending {:?}...", msg);
-
-// // send message response!
-// return send_rip_message(&node.interfaces[src_if_index], msg);
-// }
-// // if more than 1 entry, do nothing
-// _ => {
-// return Err(Error::new(
-// ErrorKind::Other,
-// "RIP requests with more than 1 entry are not currently supported.",
-// ))
-// }
-// }
-// } else if msg.command == RIP_RESPONSE {
-// return Ok(());
-// }
-
-// Ok(())
-// }

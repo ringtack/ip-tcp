@@ -23,13 +23,15 @@ pub type Handler = Arc<Mutex<dyn FnMut(IPPacket) -> Result<()> + Send>>;
  *
  * Fields:
  * - dst_addr: the destination address
- * - next_hop: the gateway address to the next node in the route
+ * - next_hop: the remote IP address to the next node in the route
+ * - gateway: local (gateway) IP address to the next node in the route
  * - cost: the cost to reach the destination
  * - changed: whether this route has been recently changed.
  */
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct Route {
     pub dst_addr: Ipv4Addr,
+    pub gateway: Ipv4Addr,
     pub next_hop: Ipv4Addr,
     pub cost: u32,
     pub changed: bool,
@@ -311,22 +313,11 @@ fn get_end_addr(interfaces: &[NetworkInterface], gateway_addr: &Ipv4Addr) -> Opt
  * Converts a route in the RoutingTable into a RouteEntry for RIPMessages.
  */
 pub fn process_route(
-    interfaces: &[NetworkInterface],
     src_addr: &Ipv4Addr,
     dst_addr: &Ipv4Addr,
     route: &Route,
 ) -> Result<RouteEntry> {
-    // get next hop's end addr
-    // let end_addr = match get_end_addr(interfaces, &route.next_hop) {
-    // Some(addr) => addr,
-    // None => {
-    // return Err(Error::new(
-    // ErrorKind::Other,
-    // "did not pass in a gateway addr",
-    // ))
-    // }
-    // };
-
+    // here next hop is the REMOTE VIRTUAL IP ADDRESS of the interface
     // if next hop is same as source, poison it
     let cost = if route.next_hop == *src_addr {
         INFINITY
@@ -390,8 +381,7 @@ pub fn make_rip_handler(
 
                     // for each route, process it (SH w/ PR) then add to entries
                     for (dst_addr, route) in routing_table.iter() {
-                        let route_entry =
-                            process_route(&*interfaces, &source_addr, dst_addr, route)?;
+                        let route_entry = process_route(&source_addr, dst_addr, route)?;
                         entries.push(route_entry);
                     }
 
@@ -440,7 +430,8 @@ pub fn make_rip_handler(
                     if new_metric < INFINITY {
                         let new_route = Route {
                             dst_addr,
-                            next_hop: gateway_addr,
+                            gateway: gateway_addr,
+                            next_hop: source_addr,
                             cost: new_metric,
                             changed: true,
                             mask: INIT_MASK,
@@ -451,12 +442,12 @@ pub fn make_rip_handler(
                     let mut route = routing_table.get_route(&dst_addr);
                     // otherwise, if (metrics diff and E's src addr == next hop addr) OR (new
                     // metric < curr metric)
-                    if (new_metric != route.cost && route.next_hop == gateway_addr)
+                    if (new_metric != route.cost && route.next_hop == source_addr)
                         || (new_metric < route.cost)
                     {
                         // set metric, and update next hop
                         route.cost = new_metric;
-                        route.next_hop = gateway_addr;
+                        route.next_hop = source_addr;
                         // mark as changed
                         route.changed = true;
 
