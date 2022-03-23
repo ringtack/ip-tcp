@@ -6,11 +6,18 @@ use std::{
     io::{self, BufRead, Error, ErrorKind},
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     path::Path,
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::{mpsc::channel, Arc, Mutex},
     thread,
 };
 
 pub type Handler = fn(IPPacket) -> Result<(), Error>;
+
+// TODO: REMOVE THIS IS JUST A TEST
+fn rip_handler(packet: IPPacket) -> Result<(), Error> {
+    let msg = recv_rip_message(&packet)?;
+    println!("Message: {:?}", msg);
+    Ok(())
+}
 
 /**
  * Structure for a Node on the Network.
@@ -24,9 +31,8 @@ pub type Handler = fn(IPPacket) -> Result<(), Error>;
  */
 pub struct Node {
     interfaces: Vec<NetworkInterface>,
-    routing_table: RoutingTable,
-    handlers: HashMap<u8, Handler>,
-    receiver: Option<Receiver<IPPacket>>,
+    routing_table: Arc<Mutex<RoutingTable>>,
+    handlers: Arc<Mutex<HashMap<u8, Handler>>>,
 }
 
 impl Node {
@@ -40,9 +46,8 @@ impl Node {
         Ok(Node {
             // src_link: LinkInterface::new(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?,
             interfaces: Vec::new(),
-            routing_table: RoutingTable::new(),
-            handlers: HashMap::new(),
-            receiver: None,
+            routing_table: Arc::new(Mutex::new(RoutingTable::new())),
+            handlers: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -97,7 +102,7 @@ impl Node {
                         }
 
                         // insert into routing table
-                        node.routing_table.insert(Route {
+                        node.insert_route(Route {
                             dst_addr: src_addr,
                             next_hop: src_addr,
                             cost: 0,
@@ -106,6 +111,11 @@ impl Node {
                     }
                 }
 
+                // TODO: REMOVE THIS IS JUST A TEST
+                node.register_handler(200, rip_handler);
+
+                thread::sleep(std::time::Duration::from_secs(2));
+
                 // Send RIP Request to each of its net interfaces (i.e. neighbors)
                 for dest_if in &node.interfaces {
                     let initial_route = RouteEntry::DUMMY_ROUTE;
@@ -113,11 +123,9 @@ impl Node {
                     send_rip_message(dest_if, rip_msg)?;
                 }
 
-                // Finally, initiate thread to listen for incoming packets
+                // Initiate thread to listen for incoming packets
                 // TODO: only one listener, or multiple?
                 let (tx, rx) = channel::<IPPacket>();
-
-                node.receiver = Some(rx);
 
                 for net_if in &node.interfaces {
                     let tx = tx.clone();
@@ -133,6 +141,19 @@ impl Node {
                     });
                 }
 
+                // Finally, infinitely process incoming messages
+                // TODO: store result somewhere
+                let handlers = Arc::clone(&node.handlers);
+                thread::spawn(move || {
+                    for packet in rx {
+                        let protocol = packet.header.protocol;
+                        let curr_handlers = handlers.lock().unwrap();
+                        if curr_handlers.contains_key(&protocol) {
+                            (curr_handlers[&protocol])(packet);
+                        }
+                    }
+                });
+
                 Ok(node)
             }
             // otherwise, parsing error, so throw error
@@ -143,24 +164,28 @@ impl Node {
         }
     }
 
-    /**
-     * Tell Node to process incoming messages.
-     */
-    pub fn listen_for_messages(&self) -> Result<(), Error> {
-        // TODO: error handling
-        if let Some(rx) = &self.receiver {
-            for packet in rx {
-                let protocol = packet.header.protocol;
-                if self.handlers.contains_key(&protocol) {
-                    match (self.handlers[&protocol])(packet) {
-                        Ok(()) => (),
-                        Err(e) => return Err(Error::new(ErrorKind::Other, e.to_string())),
-                    }
-                }
-            }
-        }
+    // pub fn listen_for_messages(&self) -> Result<(), Error> {
+    // // TODO: error handling
+    // thread::spawn(move || {
+    // if let Some(rx) = &self.receiver {
+    // for packet in rx {
+    // let protocol = packet.header.protocol;
+    // if self.handlers.contains_key(&protocol) {
+    // (self.handlers[&protocol])(packet);
+    // }
+    // }
+    // }
+    // });
 
-        Ok(())
+    // Ok(())
+    // }
+
+    /**
+     * Wrapper function to concurrently insert (update) route from routing table.
+     */
+    pub fn insert_route(&mut self, route: Route) {
+        let mut rt = self.routing_table.lock().unwrap();
+        rt.insert(route);
     }
 
     /**
@@ -171,7 +196,8 @@ impl Node {
      * - handler: the handler for the specific protocol.
      */
     pub fn register_handler(&mut self, protocol: u8, handler: Handler) {
-        self.handlers.insert(protocol, handler);
+        let mut handlers = self.handlers.lock().unwrap();
+        handlers.insert(protocol, handler);
     }
 
     /**
@@ -203,7 +229,9 @@ impl Node {
     pub fn fmt_routes(&self) -> String {
         let mut res = String::new();
         res.push_str("cost\tdst\t\tloc\n");
-        for (index, (_, route)) in self.routing_table.iter().enumerate() {
+        let routing_table = self.routing_table.lock().unwrap();
+
+        for (index, (_, route)) in routing_table.iter().enumerate() {
             res.push_str(&(format!("{}\t{}\t{}", route.cost, route.dst_addr, route.next_hop)));
             if index != self.interfaces.len() - 1 {
                 res.push('\n');

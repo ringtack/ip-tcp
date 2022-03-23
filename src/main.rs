@@ -36,9 +36,6 @@ fn main() {
 
     node.register_handler(RIP_PROTOCOL, rip_handler);
 
-    // This hangs for now, need to spawn this off in a thread
-    node.listen_for_messages();
-
     let mut shell = Shell::new(node);
     shell.new_command_noargs("help", "Print this list of commands", |io, _| {
         writeln!(io, "{}", HELP_MSG)?;
