@@ -133,9 +133,10 @@ impl Node {
                     let routing_table = Arc::clone(&node.routing_table);
                     let interfaces = Arc::clone(&node.interfaces);
                     thread::spawn(move || loop {
+                        thread::sleep(std::time::Duration::from_secs(5)); // update every 5 second
+
                         let rt = routing_table.lock().unwrap();
                         let is = interfaces.lock().unwrap();
-                        thread::sleep(std::time::Duration::from_secs(5));
                         let mut route_entries = Vec::new();
                         for (_, route) in rt.iter() {
                             route_entries
