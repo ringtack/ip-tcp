@@ -1,18 +1,22 @@
 use crate::protocol::network::rip::*;
 use crate::protocol::network::{IPPacket, NetworkInterface, RIP_PROTOCOL, TEST_PROTOCOL};
+use rand::Rng;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{self, BufRead, Error, ErrorKind, Result},
     mem,
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     path::Path,
-    sync::{mpsc::channel, Arc, Mutex},
+    sync::{
+        mpsc::{channel, RecvTimeoutError},
+        Arc, Mutex,
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-pub type Handler = Arc<Mutex<dyn FnMut(IPPacket) -> Result<()> + Send>>;
+// pub type Handler = Arc<Mutex<dyn FnMut(IPPacket) -> Result<()> + Send>>;
 
 pub struct ProtocolHandler {
     pub protocol: u8,
@@ -64,162 +68,238 @@ impl Node {
      */
     pub fn new(linksfile: String, default_handlers: Vec<ProtocolHandler>) -> Result<Node> {
         // Attempt to parse the linksfile
-        match read_lines(&linksfile) {
-            // if successful, create initial node
-            Ok(lines) => {
-                let node = Node::new_empty()?;
+        let lines = read_lines(&linksfile)?;
 
-                let mut interfaces = node.interfaces.lock().unwrap();
-                // store src socket; shared across all interfaces
-                let mut src_sock: Option<UdpSocket> = None;
+        // if successful, create initial node
+        let node = Node::new_empty()?;
+        let mut interfaces = node.interfaces.lock().unwrap();
+        // store src socket; shared across all interfaces
+        let mut src_sock: Option<UdpSocket> = None;
 
-                // iterate through every line
-                for (index, line) in lines.enumerate() {
-                    if let Ok(line) = line {
-                        let line: Vec<&str> = line.split_whitespace().collect();
-                        // regardless of source or dest, gets addr:port
-                        let sock_addr =
-                            SocketAddrV4::new(str_2_ipv4(line[0]), line[1].parse::<u16>().unwrap());
+        // iterate through every line
+        for (index, line) in lines.enumerate() {
+            let line = line?;
+            let line: Vec<&str> = line.split_whitespace().collect();
+            // regardless of source or dest, gets addr:port
+            let sock_addr = SocketAddrV4::new(str_2_ipv4(line[0]), line[1].parse::<u16>().unwrap());
 
-                        // if first line, is source "L2 address"
-                        if index == 0 {
-                            // Create socket on which node will listen
-                            println!("[Node::new] Listening on {}...", sock_addr);
+            // if first line, is source "L2 address"
+            if index == 0 {
+                // Create socket on which node will listen
+                println!("[Node::new] Listening on {}...", sock_addr);
 
-                            src_sock = Some(UdpSocket::bind(sock_addr)?);
-                            continue;
-                        }
-
-                        // otherwise, make network interface:
-                        //      <Dest L2 Address> <Dest L2 Port> <Src IF> <Dest IF>
-                        let src_addr = str_2_ipv4(line[2]);
-                        let dest_addr = str_2_ipv4(line[3]);
-
-                        if let Some(sock) = &src_sock {
-                            interfaces.push(NetworkInterface::new(
-                                (index - 1) as u8,
-                                src_addr,
-                                dest_addr,
-                                sock,
-                                sock_addr,
-                            )?);
-                        }
-
-                        // insert into routing table
-                        insert_route(
-                            Arc::clone(&node.routing_table),
-                            Route {
-                                dst_addr: src_addr,
-                                gateway: src_addr,
-                                next_hop: src_addr,
-                                cost: 0,
-                                changed: false,
-                                mask: INIT_MASK,
-                            },
-                        )?;
-                    }
-                }
-
-                // Initiate thread to listen for incoming packets
-                // TODO: only one listener, or multiple?
-                let (tx, rx) = channel::<IPPacket>();
-
-                for net_if in &*interfaces {
-                    let tx = tx.clone();
-                    let net_if = net_if.clone();
-                    // TODO: store result so we can cancel somewhere
-                    thread::spawn(move || {
-                        // infinitely listen for incoming messages
-                        loop {
-                            // TODO: error handling
-                            let packet = net_if.recv_ip().unwrap();
-                            tx.send(packet).unwrap();
-                        }
-                    });
-                }
-
-                // Configure handlers
-                let mut handlers = node.handlers.lock().unwrap();
-                // add any default handlers provided
-                for ph in default_handlers {
-                    handlers.insert(ph.protocol, Arc::clone(&ph.handler));
-                }
-                // TODO: register test handler
-                // handlers.insert(...);
-                // register rip handler
-                handlers.insert(
-                    RIP_PROTOCOL,
-                    make_rip_handler(
-                        Arc::clone(&node.interfaces),
-                        Arc::clone(&node.routing_table),
-                    ),
-                );
-                // done, so drop ref
-                mem::drop(handlers);
-
-                // Send RIP Request to each of its net interfaces (i.e. neighbors)
-                for dest_if in &*interfaces {
-                    let rip_msg = RIPMessage::new(RIP_REQUEST, 0, vec![]);
-                    send_rip_message(dest_if, rip_msg)?;
-                }
-
-                // Configure periodic RIP updates
-                let rt = Arc::clone(&node.routing_table);
-                let ifs = Arc::clone(&node.interfaces);
-                thread::spawn(move || loop {
-                    thread::sleep(Duration::from_secs(UPDATE_TIME)); // update every 5 seconds
-
-                    let routing_table = rt.lock().unwrap();
-                    let interfaces = ifs.lock().unwrap();
-                    // for each network interface:
-                    for dest_if in &*interfaces {
-                        // get processed route entries; need match since this doesn't return
-                        match routing_table.get_entries(dest_if) {
-                            Ok(route_entries) => {
-                                let msg = RIPMessage::new(
-                                    RIP_RESPONSE,
-                                    route_entries.len() as u16,
-                                    route_entries,
-                                );
-                                // custom match since doesn't return
-                                match send_rip_message(dest_if, msg) {
-                                    Ok(()) => (),
-                                    Err(e) => eprintln!("{}", e),
-                                }
-                            }
-                            Err(e) => eprintln!("{}", e),
-                        };
-                    }
-                });
-
-                // Finally, infinitely process incoming messages
-                // TODO: store result somewhere
-                let handlers = Arc::clone(&node.handlers);
-                thread::spawn(move || {
-                    for packet in rx {
-                        let protocol = packet.header.protocol;
-                        let handlers = handlers.lock().unwrap();
-                        if handlers.contains_key(&protocol) {
-                            let mut handler = handlers[&protocol].lock().unwrap();
-                            match handler(packet) {
-                                Ok(()) => (),
-                                Err(e) => eprintln!("{}", e),
-                            }
-                        }
-                    }
-                });
-
-                // unlock before returning to prevent borrow checker from complaining
-                mem::drop(interfaces);
-
-                Ok(node)
+                src_sock = Some(UdpSocket::bind(sock_addr)?);
+                continue;
             }
-            // otherwise, parsing error, so throw error
-            Err(_) => Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("invalid linksfile path: {}", linksfile),
-            )),
+
+            // otherwise, make network interface:
+            //      <Dest L2 Address> <Dest L2 Port> <Src IF> <Dest IF>
+            let src_addr = str_2_ipv4(line[2]);
+            let dest_addr = str_2_ipv4(line[3]);
+
+            if let Some(sock) = &src_sock {
+                interfaces.push(NetworkInterface::new(
+                    (index - 1) as u8,
+                    src_addr,
+                    dest_addr,
+                    sock,
+                    sock_addr,
+                )?);
+            }
+
+            // insert into routing table
+            insert_route(
+                Arc::clone(&node.routing_table),
+                Route {
+                    dst_addr: src_addr,
+                    gateway: src_addr,
+                    next_hop: src_addr,
+                    cost: 0,
+                    changed: false,
+                    mask: INIT_MASK,
+                    timer: Instant::now(),
+                },
+            )?;
         }
+
+        // Set up timeout thread (rx will be used later for trigger response thread)
+        let (tx, rx) = channel::<Ipv4Addr>();
+        let rt = Arc::clone(&node.routing_table);
+        let tx1 = tx.clone();
+        thread::spawn(move || loop {
+            // every CHECK_TIMEOUTS seconds, scan list for timeouts
+            thread::sleep(Duration::from_secs(CHECK_TIMEOUTS));
+
+            let mut rt = rt.lock().unwrap();
+            // for each route:
+            for (dst_addr, route) in rt.iter_mut() {
+                // if not a local entry (i.e. cost > 0) and time since now and last updated >
+                // TIMEOUT, notify trigger of timeout
+                if route.cost > 0 && route.timer.elapsed() > Duration::from_secs(TIMEOUT) {
+                    // before notifying, need to mark route as changed and set metric to INFINITY
+                    route.changed = true;
+                    route.cost = INFINITY;
+                    tx1.send(*dst_addr).unwrap();
+                }
+            }
+        });
+
+        // Set up trigger response thread
+        let rt = Arc::clone(&node.routing_table);
+        let ifs = Arc::clone(&node.interfaces);
+        thread::spawn(move || {
+            let mut rng = rand::thread_rng();
+            loop {
+                // TODO: should I do this?
+                // Accumulate messages for somewhere between 200-1000ms; RFC recommends
+                // 1-5s
+                let start_time = Instant::now();
+                let get_duration = Duration::from_millis(rng.gen_range(200..500));
+                let mut updated_routes = Vec::new();
+
+                // keep matching until timeout
+                loop {
+                    let now = Instant::now();
+                    // if too much time elapsed, quit out
+                    if start_time + get_duration <= now {
+                        break;
+                    }
+                    // time left to wait
+                    let duration = start_time + get_duration - now;
+                    // block until duration ends, or a message is sent
+                    match rx.recv_timeout(duration) {
+                        Ok(dst_addr) => {
+                            let rt = rt.lock().unwrap();
+                            if rt.has_dst(&dst_addr) {
+                                updated_routes.push(rt.get_route(&dst_addr));
+                            }
+                        }
+                        // in this case, timer up
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Disconnected) => {
+                            // handle shutdown
+                            eprintln!("Trigger connection closed. Shutting down...");
+                            return;
+                        }
+                    }
+                }
+                // if no updates, just continue
+                if updated_routes.is_empty() {
+                    continue;
+                }
+
+                println!("got trigger!");
+
+                // now, send updates to all nodes, with processing:
+                // - if a route's metric is INFINITY, mark for deletion
+                // - SH w/ PR
+                let mut to_delete = HashSet::new();
+
+                let ifs = ifs.lock().unwrap();
+                // for each network interface, process then send
+                for dst_if in &*ifs {
+                    match RoutingTable::process_updates(&updated_routes, &mut to_delete, dst_if) {
+                        // if properly converted, send RIP message
+                        Ok(route_entries) => send_route_entries(dst_if, route_entries),
+                        // otherwise, dislpay error
+                        Err(e) => eprintln!("{}", e),
+                    }
+                }
+                // don't need lock on IFs anymore
+                mem::drop(ifs);
+
+                // finally, for all expired routes, delete!
+                let mut rt = rt.lock().unwrap();
+                for expired_dst in to_delete {
+                    rt.delete(&expired_dst);
+                }
+            }
+        });
+
+        // Configure handlers
+        let mut handlers = node.handlers.lock().unwrap();
+        // add any default handlers provided
+        for ph in default_handlers {
+            handlers.insert(ph.protocol, Arc::clone(&ph.handler));
+        }
+        // TODO: register test handler
+        // handlers.insert(...);
+        // register rip handler
+        handlers.insert(
+            RIP_PROTOCOL,
+            make_rip_handler(
+                Arc::clone(&node.interfaces),
+                Arc::clone(&node.routing_table),
+                tx,
+            ),
+        );
+        // done, so drop ref
+        mem::drop(handlers);
+
+        // Send RIP Request to each of its net interfaces (i.e. neighbors)
+        for dest_if in &*interfaces {
+            let rip_msg = RIPMessage::new(RIP_REQUEST, 0, vec![]);
+            send_rip_message(dest_if, rip_msg)?;
+        }
+
+        // Configure periodic RIP updates
+        let rt = Arc::clone(&node.routing_table);
+        let ifs = Arc::clone(&node.interfaces);
+        // move references into thread
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_secs(UPDATE_TIME)); // update every 5 seconds
+
+            let routing_table = rt.lock().unwrap();
+            let interfaces = ifs.lock().unwrap();
+            // for each network interface:
+            for dst_if in &*interfaces {
+                // get processed route entries; need match since this doesn't return
+                match routing_table.get_entries(dst_if) {
+                    Ok(route_entries) => send_route_entries(dst_if, route_entries),
+                    Err(e) => eprintln!("{}", e),
+                };
+            }
+        });
+
+        // Initiate thread to listen for incoming packets
+        // TODO: only one listener, or multiple?
+        let (tx, rx) = channel::<IPPacket>();
+
+        for net_if in &*interfaces {
+            let tx = tx.clone();
+            let net_if = net_if.clone();
+            // TODO: store result so we can cancel somewhere
+            thread::spawn(move || {
+                // infinitely listen for incoming messages
+                loop {
+                    // TODO: error handling
+                    let packet = net_if.recv_ip().unwrap();
+                    tx.send(packet).unwrap();
+                }
+            });
+        }
+
+        // Finally, infinitely process incoming messages
+        // TODO: store result somewhere
+        let handlers = Arc::clone(&node.handlers);
+        thread::spawn(move || {
+            for packet in rx {
+                let protocol = packet.header.protocol;
+                let handlers = handlers.lock().unwrap();
+                if handlers.contains_key(&protocol) {
+                    let mut handler = handlers[&protocol].lock().unwrap();
+                    match handler(packet) {
+                        Ok(()) => (),
+                        Err(e) => eprintln!("{}", e),
+                    }
+                }
+            }
+        });
+
+        // unlock before returning to prevent borrow checker from complaining
+        mem::drop(interfaces);
+
+        Ok(node)
     }
 
     /**
@@ -339,6 +419,18 @@ impl Node {
         }
         interfaces[id].link_if.link_up();
         Ok(())
+    }
+}
+
+/**
+ * Helper function to send route entries to a destination interface.
+ */
+fn send_route_entries(dst_if: &NetworkInterface, route_entries: Vec<RouteEntry>) {
+    let msg = RIPMessage::new(RIP_RESPONSE, route_entries.len() as u16, route_entries);
+    // custom match since doesn't return
+    match send_rip_message(dst_if, msg) {
+        Ok(()) => (),
+        Err(e) => eprintln!("{}", e),
     }
 }
 
