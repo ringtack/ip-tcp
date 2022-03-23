@@ -7,10 +7,8 @@ extern crate shrust;
 use shrust::{Shell, ShellIO};
 use std::io::{prelude::*, Error};
 use std::process;
-use std::thread;
 
-use crate::protocol::network::rip::*;
-use crate::protocol::network::{IPPacket, RIP_PROTOCOL};
+use crate::protocol::network::{rip::*, IPPacket};
 
 #[derive(Parser)]
 struct Args {
@@ -26,7 +24,7 @@ fn rip_handler(packet: IPPacket) -> Result<(), Error> {
 fn main() {
     let args = Args::parse();
     // Attempt to make a node
-    let mut node = match Node::new(args.linksfile) {
+    let node = match Node::new(args.linksfile) {
         Ok(node) => node,
         Err(e) => {
             eprintln!("{}", e);

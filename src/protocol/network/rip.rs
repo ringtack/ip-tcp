@@ -1,4 +1,4 @@
-use crate::protocol::network::{IPPacket, NetworkInterface, RIP_PROTOCOL, TEST_PROTOCOL};
+use crate::protocol::network::{IPPacket, NetworkInterface, RIP_PROTOCOL};
 use byteorder::*;
 use std::collections::hash_map::Iter;
 use std::collections::HashMap;

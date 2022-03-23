@@ -274,7 +274,7 @@ impl Node {
                 format!("interface {} is down already", id),
             ));
         }
-        interfaces[id].link_if.active = false;
+        interfaces[id].link_if.link_down();
         Ok(())
     }
 
@@ -301,7 +301,7 @@ impl Node {
                 format!("interface {} is up already", id),
             ));
         }
-        interfaces[id].link_if.active = true;
+        interfaces[id].link_if.link_up();
         Ok(())
     }
 }

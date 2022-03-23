@@ -7,7 +7,7 @@ use std::{
     net,
 };
 
-pub const TEST_PROTOCOL: u8 = 0;
+// pub const TEST_PROTOCOL: u8 = 0;
 pub const RIP_PROTOCOL: u8 = 200;
 
 /**
