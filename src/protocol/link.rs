@@ -93,7 +93,10 @@ impl LinkInterface {
      * - A Result<(net::SocketAddr, [u8; MTU]), Error> of the source socket addr and payload, or an
      * error
      */
-    pub fn recv_link_frame(&self, payload: &mut [u8; MTU]) -> Result<net::SocketAddr, Error> {
+    pub fn recv_link_frame(
+        &self,
+        payload: &mut [u8; MTU],
+    ) -> Result<(usize, net::SocketAddr), Error> {
         // if locally not active, return an error
         if !self.active {
             return Err(Error::new(ErrorKind::NotConnected, "Link is down."));
@@ -104,6 +107,6 @@ impl LinkInterface {
         if num_bytes > MTU {
             return Err(Error::new(ErrorKind::Other, "received too many bytes."));
         }
-        Ok(src_addr)
+        Ok((num_bytes, src_addr))
     }
 }

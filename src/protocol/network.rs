@@ -31,12 +31,12 @@ pub struct NetworkInterface {
 /**
  * IP Packet.
  */
-pub struct IPPacket<'a> {
+pub struct IPPacket {
     header: Ipv4Header,
-    payload: &'a [u8], // how to make VLA in Rust?
+    payload: Vec<u8>,
 }
 
-impl<'a> IPPacket<'a> {
+impl IPPacket {
     /**
      * Creates a new IP packet.
      *
@@ -48,12 +48,7 @@ impl<'a> IPPacket<'a> {
      * Returns:
      * - an IP Packet!
      */
-    pub fn new(
-        net_if: &NetworkInterface,
-        payload: &'a [u8],
-        ttl: u8,
-        protocol: u8,
-    ) -> IPPacket<'a> {
+    pub fn new(net_if: &NetworkInterface, payload: Vec<u8>, ttl: u8, protocol: u8) -> IPPacket {
         let mut packet = IPPacket {
             header: Ipv4Header::new(
                 payload.len() as u16,
@@ -66,6 +61,9 @@ impl<'a> IPPacket<'a> {
         };
         // set protocol to specified protocol (test: 0, or RIP: 200)
         packet.header.protocol = protocol;
+        // set checksum
+        packet.header.header_checksum = packet.header.calc_header_checksum().unwrap();
+
         packet
     }
 }
@@ -92,8 +90,10 @@ impl NetworkInterface {
      * Sends an IP packet with the given payload.
      */
     pub fn send_ip(&self, payload: &[u8], protocol: u8) -> Result<(), Error> {
+        let mut buf = Vec::<u8>::with_capacity(payload.len());
+        buf.extend_from_slice(payload);
         // make packet
-        let packet = IPPacket::new(self, payload, DEFAULT_TTL, protocol);
+        let packet = IPPacket::new(self, buf, DEFAULT_TTL, protocol);
 
         // convert packet into bytes
         let mut header_bytes = Vec::<u8>::with_capacity(packet.header.header_len());
@@ -113,10 +113,14 @@ impl NetworkInterface {
      * Receives an IP Packet.
      */
     pub fn recv_ip(&self) -> Result<IPPacket, Error> {
-        let payload: [u8; MTU] = [0; MTU];
-        self.src_link.recv_link_frame(&mut payload)?;
-        match Ipv4Header::from_slice(&payload) {
-            Ok((header, payload)) => Ok(IPPacket { header, payload }),
+        let mut buf: [u8; MTU] = [0; MTU];
+        let (num_bytes, _) = self.src_link.recv_link_frame(&mut buf)?;
+        match Ipv4Header::from_slice(&buf) {
+            Ok((header, buf)) => {
+                let mut payload = Vec::<u8>::with_capacity(num_bytes);
+                payload.extend_from_slice(&buf[..num_bytes]);
+                Ok(IPPacket { header, payload })
+            }
             Err(e) => Err(Error::new(ErrorKind::Other, e.to_string())),
         }
     }
