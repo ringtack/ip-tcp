@@ -1,7 +1,8 @@
+use crate::protocol::network::{IPPacket, NetworkInterface, RIP_PROTOCOL, TEST_PROTOCOL};
 use byteorder::*;
 use std::collections::hash_map::Iter;
 use std::collections::HashMap;
-use std::io::Error;
+use std::io::{Error, ErrorKind};
 use std::mem;
 use std::net::Ipv4Addr;
 
@@ -9,6 +10,9 @@ pub const MAX_ROUTES: usize = 64;
 pub const DEFAULT_TTL: u8 = 16; // TODO: which value???
 pub const INFINITY: u32 = 16;
 pub const INIT_MASK: u32 = u32::MAX;
+
+pub const RIP_REQUEST: u16 = 1;
+pub const RIP_RESPONSE: u16 = 2;
 
 /**
  * Struct representing a Route in the RoutingTable.
@@ -74,7 +78,7 @@ impl RouteEntry {
     };
 
     /**
-     * Converts struct into a vector of bytes.
+     * Converts RouteEntry into a vector of bytes.
      */
     pub fn to_bytes(&self) -> Vec<u8> {
         // create byte vector of enough size
@@ -126,7 +130,7 @@ impl RIPMessage {
     }
 
     /**
-     * Converts struct into a vector of bytes.
+     * Converts RIPMessage into a vector of bytes.
      */
     pub fn to_bytes(&self) -> Vec<u8> {
         // create bytes vector of the correct size
@@ -139,6 +143,7 @@ impl RIPMessage {
         bytes.extend_from_slice(&u16::to_be_bytes(self.num_entries));
 
         // for every entry, get byte representation and append to bytes
+        // TODO: figure out how to do this all at once?
         for i in 0..self.num_entries {
             let entry_bytes = self.entries[i as usize].to_bytes();
             bytes.extend_from_slice(entry_bytes.as_slice());
@@ -147,6 +152,9 @@ impl RIPMessage {
         bytes
     }
 
+    /**
+     * Converts a slice of bytes into a RIPMessage.
+     */
     pub fn from_bytes(mut payload: &[u8]) -> Result<RIPMessage, Error> {
         let command = payload.read_u16::<NetworkEndian>()?;
         let num_entries = payload.read_u16::<NetworkEndian>()?;
@@ -163,4 +171,44 @@ impl RIPMessage {
 
         Ok(msg)
     }
+}
+
+/**
+ * Sends a RIP message to the specified destination interface.
+ *
+ * Inputs:
+ * - dest_if: where to send RIP message
+ * - msg: the RIP message
+ *
+ * Returns:
+ * - A Result<(), Error> with nothing, or an error
+ */
+pub fn send_rip_message(dest_if: &NetworkInterface, msg: RIPMessage) -> Result<(), Error> {
+    let payload = msg.to_bytes();
+    dest_if.send_ip(payload.as_slice(), RIP_PROTOCOL)
+}
+
+/**
+ * Parses a RIP Message from a packet.
+ */
+pub fn recv_rip_message(packet: &IPPacket) -> Result<RIPMessage, Error> {
+    // Validate appropriate protocol
+    if packet.header.protocol != RIP_PROTOCOL {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "Invalid protocol! Must be 200 (RIP).",
+        ));
+    }
+
+    // create RIP message
+    let msg = RIPMessage::from_bytes(packet.payload.as_slice())?;
+    // validate command
+    if msg.command != RIP_REQUEST || msg.command != RIP_RESPONSE {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "Invalid command! Must be 1 (request) or 2 (response)",
+        ));
+    }
+
+    Ok(msg)
 }

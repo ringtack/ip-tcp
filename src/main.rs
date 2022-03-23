@@ -5,9 +5,9 @@ use clap::Parser;
 use node::Node;
 extern crate shrust;
 use shrust::{Shell, ShellIO};
-use std::env;
 use std::io::prelude::*;
 use std::process;
+use std::thread;
 
 #[derive(Parser)]
 struct Args {

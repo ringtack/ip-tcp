@@ -1,12 +1,17 @@
 use crate::protocol::link::LinkInterface;
-use crate::protocol::network::rip::{RIPMessage, Route, RouteEntry, RoutingTable};
-use crate::protocol::network::{NetworkInterface, RIP_PROTOCOL, TEST_PROTOCOL};
+use crate::protocol::network::rip::*;
+use crate::protocol::network::{IPPacket, NetworkInterface};
 use std::{
+    collections::HashMap,
     fs::File,
     io::{self, BufRead, Error, ErrorKind},
     net::{Ipv4Addr, SocketAddrV4},
     path::Path,
+    sync::mpsc::{channel, Receiver, Sender},
+    thread,
 };
+
+pub type Handler = fn(IPPacket) -> Result<(), Error>;
 
 /**
  * Structure for a Node on the Network.
@@ -20,6 +25,8 @@ pub struct Node {
     src_link: LinkInterface,
     interfaces: Vec<NetworkInterface>,
     routing_table: RoutingTable,
+    handlers: HashMap<u8, Handler>,
+    receiver: Option<Receiver<IPPacket>>,
 }
 
 impl Node {
@@ -34,6 +41,8 @@ impl Node {
             src_link: LinkInterface::new(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?,
             interfaces: Vec::new(),
             routing_table: RoutingTable::new(),
+            handlers: HashMap::new(),
+            receiver: None,
         })
     }
 
@@ -87,12 +96,33 @@ impl Node {
                     }
                 }
 
-                // finally, send RIP Request to each of its net interfaces (i.e. neighbors)
+                // Send RIP Request to each of its net interfaces (i.e. neighbors)
                 for dest_if in &node.interfaces {
                     let initial_route = RouteEntry::DUMMY_ROUTE;
                     let rip_msg = RIPMessage::new(1, 1, vec![initial_route]);
-                    node.send_rip_message(dest_if, rip_msg)?;
+                    send_rip_message(dest_if, rip_msg)?;
                 }
+
+                // Finally, initiate thread to listen for incoming packets
+                // TODO: only one listener, or multiple?
+                let (tx, rx) = channel::<IPPacket>();
+
+                node.receiver = Some(rx);
+
+                for net_if in &node.interfaces {
+                    let tx = tx.clone();
+                    let net_if = net_if.clone();
+                    // TODO: store result so we can cancel somewhere
+                    thread::spawn(move || {
+                        // infinitely listen for incoming messages
+                        loop {
+                            // TODO: error handling
+                            let packet = net_if.recv_ip().unwrap();
+                            tx.send(packet).unwrap();
+                        }
+                    });
+                }
+
                 Ok(node)
             }
             Err(_) => Err(Error::new(
@@ -103,22 +133,30 @@ impl Node {
     }
 
     /**
-     * Sends a RIP message to the specified destination interface.
+     * Tell Node to process receiving messages.
+     */
+    fn listen_for_messages(&self) {
+        // TODO: error handling
+        if let Some(rx) = &self.receiver {
+            for packet in rx {
+                let packet: IPPacket = packet;
+                let protocol = packet.header.protocol;
+                if self.handlers.contains_key(&protocol) {
+                    (self.handlers[&protocol])(packet);
+                }
+            }
+        }
+    }
+
+    /**
+     * Register handler for a specific protocol.
      *
      * Inputs:
-     * - dest_if: where to send RIP message
-     * - msg: the RIP message
-     *
-     * Returns:
-     * - A Result<(), Error> with nothing, or an error
+     * - protocol: the protocol for which a handler should be registered
+     * - handler: the handler for the specific protocol.
      */
-    pub fn send_rip_message(
-        &self,
-        dest_if: &NetworkInterface,
-        msg: RIPMessage,
-    ) -> Result<(), Error> {
-        let payload = msg.to_bytes();
-        dest_if.send_ip(payload.as_slice(), RIP_PROTOCOL)
+    pub fn register_handler(&mut self, protocol: u8, handler: Handler) {
+        self.handlers.insert(protocol, handler);
     }
 
     /**

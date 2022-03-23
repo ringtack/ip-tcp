@@ -3,6 +3,7 @@ use crate::protocol::link::{LinkInterface, MTU};
 use crate::protocol::network::rip::DEFAULT_TTL;
 use etherparse::{IpNumber, Ipv4Header};
 use std::{
+    collections::HashSet,
     io::{Error, ErrorKind},
     net,
 };
@@ -20,6 +21,7 @@ pub const RIP_PROTOCOL: u8 = 200;
  * - dst_addr: the IP address of the dest IF.
  * - dst_link: the link interface of the destination.
  */
+#[derive(Clone)]
 pub struct NetworkInterface {
     pub id: u8,
     pub src_addr: net::Ipv4Addr,
@@ -32,8 +34,8 @@ pub struct NetworkInterface {
  * IP Packet.
  */
 pub struct IPPacket {
-    header: Ipv4Header,
-    payload: Vec<u8>,
+    pub header: Ipv4Header,
+    pub payload: Vec<u8>,
 }
 
 impl IPPacket {
@@ -88,6 +90,13 @@ impl NetworkInterface {
 
     /**
      * Sends an IP packet with the given payload.
+     *
+     * Inputs:
+     * - payload: payload of bytes to send.
+     * - protocol: which IP protocol to use (0: Test, 200: RIP, more to come)
+     *
+     * Returns:
+     * - Whether operation was successful or not
      */
     pub fn send_ip(&self, payload: &[u8], protocol: u8) -> Result<(), Error> {
         let mut buf = Vec::<u8>::with_capacity(payload.len());
@@ -109,16 +118,25 @@ impl NetworkInterface {
         Ok(())
     }
 
-    /*
+    /**
      * Receives an IP Packet.
+     *
+     * Returns:
+     * - A Result<IPPacket, Error> with the received IP packet, or an error
      */
     pub fn recv_ip(&self) -> Result<IPPacket, Error> {
         let mut buf: [u8; MTU] = [0; MTU];
+        // get L2 payload
         let (num_bytes, _) = self.src_link.recv_link_frame(&mut buf)?;
+        // custom handling (since from_slice gives a weird error :/)
         match Ipv4Header::from_slice(&buf) {
             Ok((header, buf)) => {
+                // TODO: validation
+
+                // get IP payload from L2 payload
                 let mut payload = Vec::<u8>::with_capacity(num_bytes);
                 payload.extend_from_slice(&buf[..num_bytes]);
+                // return packet
                 Ok(IPPacket { header, payload })
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e.to_string())),
