@@ -2,17 +2,14 @@ mod node;
 mod protocol;
 
 use clap::Parser;
-use node::Node;
+use node::*;
 extern crate shrust;
 use shrust::{Shell, ShellIO};
 use std::io::{prelude::*, Error};
-use std::mem;
 use std::process;
 use std::sync::{Arc, Mutex};
-use std::thread;
 
-use crate::protocol::network::rip::*;
-use crate::protocol::network::{IPPacket, RIP_PROTOCOL};
+use crate::protocol::network::{rip::*, *};
 
 #[derive(Parser)]
 struct Args {
@@ -28,8 +25,14 @@ fn rip_handler(packet: IPPacket) -> Result<(), Error> {
 
 fn main() {
     let args = Args::parse();
+
+    let ph = ProtocolHandler {
+        protocol: RIP_PROTOCOL,
+        handler: Arc::new(Mutex::new(rip_handler)),
+    };
+
     // Attempt to make a node
-    let mut node = match Node::new(args.linksfile, vec![Arc::new(Mutex::new(rip_handler))]) {
+    let node = match Node::new(args.linksfile, vec![ph]) {
         Ok(node) => node,
         Err(e) => {
             eprintln!("{}", e);
@@ -37,10 +40,10 @@ fn main() {
         }
     };
 
-    node.register_handler(
-        RIP_PROTOCOL,
-        make_rip_handler(node.get_interfaces(), node.get_routing_table()),
-    );
+    // node.register_handler(
+    // RIP_PROTOCOL,
+    // make_rip_handler(node.get_interfaces(), node.get_routing_table()),
+    // );
 
     let mut shell = Shell::new(node);
     shell.new_command_noargs("help", "Print this list of commands", |io, _| {

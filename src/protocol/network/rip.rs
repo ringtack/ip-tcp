@@ -16,6 +16,8 @@ pub const INIT_MASK: u32 = u32::MAX;
 pub const RIP_REQUEST: u16 = 1;
 pub const RIP_RESPONSE: u16 = 2;
 
+pub const UPDATE_TIME: u64 = 5;
+
 pub type Handler = Arc<Mutex<dyn FnMut(IPPacket) -> Result<()> + Send>>;
 
 /**
@@ -50,6 +52,20 @@ impl RoutingTable {
         RoutingTable {
             routes: HashMap::new(),
         }
+    }
+
+    pub fn get_entries(&self, net_if: &NetworkInterface) -> Result<Vec<RouteEntry>> {
+        let mut entries: Vec<RouteEntry> = Vec::<RouteEntry>::with_capacity(self.size());
+
+        let remote_addr = &net_if.dst_addr;
+        // for each route, process it (SH w/ PR) then add to entries
+        for (dst_addr, route) in self.iter() {
+            // check if net_if's remote_addr is same as route.next_hop; if so, poison it
+            let route_entry = process_route(remote_addr, dst_addr, route)?;
+            entries.push(route_entry);
+        }
+
+        Ok(entries)
     }
 
     pub fn size(&self) -> usize {
@@ -93,7 +109,7 @@ pub fn insert_route(routing_table: Arc<Mutex<RoutingTable>>, route: Route) {
  * - address: destination address
  * - mask: netmask; default is 255.255.255.255
  */
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteEntry {
     pub cost: u32,
     pub address: u32,
@@ -147,7 +163,7 @@ impl RouteEntry {
  * - num_entries: number of RouteEntries
  * - entries: vector of entries
  */
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RIPMessage {
     pub command: u16,
     pub num_entries: u16,
@@ -294,7 +310,7 @@ pub fn validate_entry(entry: &RouteEntry) -> Result<()> {
 }
 
 /**
- * Find opposite IP address of a gateway IP address.
+ * Find remote IP address of a gateway IP address.
  */
 fn get_end_addr(interfaces: &[NetworkInterface], gateway_addr: &Ipv4Addr) -> Option<Ipv4Addr> {
     let mut end_addr = None;
@@ -311,6 +327,14 @@ fn get_end_addr(interfaces: &[NetworkInterface], gateway_addr: &Ipv4Addr) -> Opt
 
 /**
  * Converts a route in the RoutingTable into a RouteEntry for RIPMessages.
+ *
+ * Inputs:
+ * - src_addr: the source of the route. Compare with route.next_hop for SH w/ PR.
+ * - dst_addr: the final destination of the route.
+ * - route: the route to process
+ *
+ * Returns:
+ * - A Return<RouteEntry> with the processed route entry, or an error
  */
 pub fn process_route(
     src_addr: &Ipv4Addr,
@@ -344,7 +368,7 @@ pub fn make_rip_handler(
         let remote_addr = Ipv4Addr::from(packet.header.source);
         let gateway_addr = Ipv4Addr::from(packet.header.destination);
 
-        println!("Remote: {}\tGateway: {}", remote_addr, gateway_addr);
+        // println!("Remote: {}\tGateway: {}", remote_addr, gateway_addr);
 
         // check that source addr is one of the destination interfaces
         let src_if_index = in_interfaces(&remote_addr, &*interfaces);
@@ -359,23 +383,27 @@ pub fn make_rip_handler(
         // first, attempt to parse into rip message; validates that protocol is right
         let msg = recv_rip_message(&packet)?;
 
-        println!("RIP Message: {:?}", msg);
+        // lock routing table; may need to process
+        let mut routing_table = routing_table.lock().unwrap();
 
         // Handle Request
         if msg.command == RIP_REQUEST {
             match msg.num_entries {
                 // if no entries, send response
                 0 => {
-                    let routing_table = routing_table.lock().unwrap();
-                    // for each entry in the routing table, add to RIP message
-                    let mut entries: Vec<RouteEntry> =
-                        Vec::<RouteEntry>::with_capacity(routing_table.size());
+                    // TODO: is this allowed? or necessary? or recommended?
+                    // add incoming connection to routing table; has to be best path
+                    // routing_table.insert(Route {
+                    // dst_addr: remote_addr,
+                    // gateway: gateway_addr,
+                    // next_hop: remote_addr,
+                    // cost: 1,
+                    // changed: true,
+                    // mask: INIT_MASK,
+                    // });
 
-                    // for each route, process it (SH w/ PR) then add to entries
-                    for (dst_addr, route) in routing_table.iter() {
-                        let route_entry = process_route(&remote_addr, dst_addr, route)?;
-                        entries.push(route_entry);
-                    }
+                    // get processed list of entries in routing table
+                    let entries = routing_table.get_entries(&interfaces[src_if_index])?;
 
                     // make new RIP message
                     let msg = RIPMessage {
@@ -396,14 +424,11 @@ pub fn make_rip_handler(
                 }
             }
         } else if msg.command == RIP_RESPONSE {
-            // for each entry in the routing table, add to RIP message
-            let mut routing_table = routing_table.lock().unwrap();
-
             // process each entry
             for entry in msg.entries {
                 // first, validate each entry
                 match validate_entry(&entry) {
-                    Ok(_) => println!("Current entry: {:?}", entry),
+                    Ok(_) => (), //println!("Current entry: {:?}", entry),
                     Err(e) => {
                         println!("{}", e);
                         continue;
@@ -418,19 +443,20 @@ pub fn make_rip_handler(
                 if !routing_table.has_dst(&dst_addr) {
                     // if not infinity, add to routing table
                     if new_metric < INFINITY {
-                        let new_route = Route {
+                        routing_table.insert(Route {
                             dst_addr,
                             gateway: gateway_addr,
                             next_hop: remote_addr,
                             cost: new_metric,
                             changed: true,
                             mask: INIT_MASK,
-                        };
-                        routing_table.insert(new_route);
+                        });
                     }
+                    // TODO: notify that a change has happened
                 } else {
+                    // get copy of route; will change
                     let mut route = routing_table.get_route(&dst_addr);
-                    // otherwise, if (metrics diff and E's src addr == next hop addr) OR (new
+                    // if (metrics diff and E's src addr == next hop addr) OR (new
                     // metric < curr metric)
                     if (new_metric != route.cost && route.next_hop == remote_addr)
                         || (new_metric < route.cost)
@@ -441,9 +467,12 @@ pub fn make_rip_handler(
                         // mark as changed
                         route.changed = true;
 
+                        // TODO: notify that a change has happened
+
                         // if metric is infinity, delete from table
                         if new_metric == INFINITY {
                             // TODO: figure out deletion steps
+                            // should just need to signal triggered updates; should let that remove
                         } else {
                             // otherwise, update routing table
                             routing_table.insert(route);
@@ -451,8 +480,6 @@ pub fn make_rip_handler(
                     }
                 }
             }
-
-            println!("\n");
         }
 
         Ok(())

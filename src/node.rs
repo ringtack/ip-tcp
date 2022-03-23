@@ -1,5 +1,5 @@
 use crate::protocol::network::rip::*;
-use crate::protocol::network::{IPPacket, NetworkInterface};
+use crate::protocol::network::{IPPacket, NetworkInterface, RIP_PROTOCOL, TEST_PROTOCOL};
 use std::{
     collections::HashMap,
     fs::File,
@@ -9,9 +9,15 @@ use std::{
     path::Path,
     sync::{mpsc::channel, Arc, Mutex},
     thread,
+    time::Duration,
 };
 
 pub type Handler = Arc<Mutex<dyn FnMut(IPPacket) -> Result<()> + Send>>;
+
+pub struct ProtocolHandler {
+    pub protocol: u8,
+    pub handler: Handler,
+}
 
 /**
  * Structure for a Node on the Network.
@@ -56,7 +62,7 @@ impl Node {
      * Returns:
      * - A Result<Node, Error> with the node configuration specified in the link file, or error.
      */
-    pub fn new(linksfile: String, default_handlers: Vec<Handler>) -> Result<Node> {
+    pub fn new(linksfile: String, default_handlers: Vec<ProtocolHandler>) -> Result<Node> {
         // Attempt to parse the linksfile
         match read_lines(&linksfile) {
             // if successful, create initial node
@@ -132,17 +138,59 @@ impl Node {
                     });
                 }
 
-                // TODO: REMOVE THIS IS JUST A TEST
+                // Configure handlers
                 let mut handlers = node.handlers.lock().unwrap();
-                handlers.insert(200, Arc::clone(&default_handlers[0]));
+                // add any default handlers provided
+                for ph in default_handlers {
+                    handlers.insert(ph.protocol, Arc::clone(&ph.handler));
+                }
+                // TODO: register test handler
+                // handlers.insert(...);
+                // register rip handler
+                handlers.insert(
+                    RIP_PROTOCOL,
+                    make_rip_handler(
+                        Arc::clone(&node.interfaces),
+                        Arc::clone(&node.routing_table),
+                    ),
+                );
+                // done, so drop ref
                 mem::drop(handlers);
-                thread::sleep(std::time::Duration::from_secs(3));
 
                 // Send RIP Request to each of its net interfaces (i.e. neighbors)
                 for dest_if in &*interfaces {
                     let rip_msg = RIPMessage::new(RIP_REQUEST, 0, vec![]);
                     send_rip_message(dest_if, rip_msg)?;
                 }
+
+                // Configure periodic RIP updates
+                let rt = Arc::clone(&node.routing_table);
+                let ifs = Arc::clone(&node.interfaces);
+                thread::spawn(move || loop {
+                    thread::sleep(Duration::from_secs(UPDATE_TIME)); // update every 5 seconds
+
+                    let routing_table = rt.lock().unwrap();
+                    let interfaces = ifs.lock().unwrap();
+                    // for each network interface:
+                    for dest_if in &*interfaces {
+                        // get processed route entries; need match since this doesn't return
+                        match routing_table.get_entries(dest_if) {
+                            Ok(route_entries) => {
+                                let msg = RIPMessage::new(
+                                    RIP_RESPONSE,
+                                    route_entries.len() as u16,
+                                    route_entries,
+                                );
+                                // custom match since doesn't return
+                                match send_rip_message(dest_if, msg) {
+                                    Ok(()) => (),
+                                    Err(e) => eprintln!("{}", e),
+                                }
+                            }
+                            Err(e) => eprintln!("{}", e),
+                        };
+                    }
+                });
 
                 // Finally, infinitely process incoming messages
                 // TODO: store result somewhere
@@ -155,7 +203,7 @@ impl Node {
                             let mut handler = handlers[&protocol].lock().unwrap();
                             match handler(packet) {
                                 Ok(()) => (),
-                                Err(e) => println!("{}", e),
+                                Err(e) => eprintln!("{}", e),
                             }
                         }
                     }
@@ -262,7 +310,7 @@ impl Node {
                 format!("interface {} is down already", id),
             ));
         }
-        interfaces[id].link_if.active = false;
+        interfaces[id].link_if.link_down();
         Ok(())
     }
 
@@ -289,7 +337,7 @@ impl Node {
                 format!("interface {} is up already", id),
             ));
         }
-        interfaces[id].link_if.active = true;
+        interfaces[id].link_if.link_up();
         Ok(())
     }
 }

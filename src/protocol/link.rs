@@ -32,19 +32,6 @@ impl Clone for LinkInterface {
 
 impl LinkInterface {
     /**
-     * Creates a new link interface, given a socket address.
-     */
-    // pub fn new(socket_addr: SocketAddrV4) -> Result<LinkInterface, Error> {
-    // println!("Binding to {}...", socket_addr);
-    // let link_interface = LinkInterface {
-    // socket: UdpSocket::bind(socket_addr)?,
-    // socket_addr,
-    // active: true,
-    // };
-    // Ok(link_interface)
-    // }
-
-    /**
      * Creates a new link interface from a given source socket (SOURCE LINK) and socket address
      * (DESTINATION LINK ADDR).
      */
@@ -97,9 +84,7 @@ impl LinkInterface {
         if payload.len() > MTU {
             return Err(Error::new(ErrorKind::InvalidData, "payload too large"));
         }
-
-        println!("Sending frame to {}...", self.dst_link_addr);
-
+        // println!("Sending frame to {}...", self.dst_link_addr);
         self.src_link.send_to(payload, self.dst_link_addr)
     }
 
