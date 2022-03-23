@@ -55,6 +55,14 @@ impl RoutingTable {
 }
 
 /**
+ * Wrapper function to concurrently insert (update) route from routing table.
+ */
+pub fn insert_route(routing_table: Arc<Mutex<RoutingTable>>, route: Route) {
+    let mut rt = routing_table.lock().unwrap();
+    rt.insert(route);
+}
+
+/**
  * Struct representing a route entry in a RIP message.
  *
  * Fields:

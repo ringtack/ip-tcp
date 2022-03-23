@@ -34,7 +34,7 @@ fn main() {
         }
     };
 
-    node.register_handler(RIP_PROTOCOL, rip_handler);
+    // register_handler(RIP_PROTOCOL, rip_handler);
 
     let mut shell = Shell::new(node);
     shell.new_command_noargs("help", "Print this list of commands", |io, _| {

@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{self, BufRead, Error, ErrorKind},
+    mem,
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     path::Path,
     sync::{mpsc::channel, Arc, Mutex},
@@ -30,7 +31,7 @@ fn rip_handler(packet: IPPacket) -> Result<(), Error> {
  * - receiver: Receiver channel on which Senders send messages.
  */
 pub struct Node {
-    interfaces: Vec<NetworkInterface>,
+    interfaces: Arc<Mutex<Vec<NetworkInterface>>>,
     routing_table: Arc<Mutex<RoutingTable>>,
     handlers: Arc<Mutex<HashMap<u8, Handler>>>,
 }
@@ -44,8 +45,7 @@ impl Node {
      */
     pub fn new_empty() -> Result<Node, Error> {
         Ok(Node {
-            // src_link: LinkInterface::new(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?,
-            interfaces: Vec::new(),
+            interfaces: Arc::new(Mutex::new(Vec::new())),
             routing_table: Arc::new(Mutex::new(RoutingTable::new())),
             handlers: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -65,7 +65,9 @@ impl Node {
         match read_lines(&linksfile) {
             // if successful, create initial node
             Ok(lines) => {
-                let mut node = Node::new_empty()?;
+                let node = Node::new_empty()?;
+
+                let mut interfaces = node.interfaces.lock().unwrap();
                 // store src socket; shared across all interfaces
                 let mut src_sock: Option<UdpSocket> = None;
 
@@ -92,7 +94,7 @@ impl Node {
                         let dest_addr = str_2_ipv4(line[3]);
 
                         if let Some(sock) = &src_sock {
-                            node.interfaces.push(NetworkInterface::new(
+                            interfaces.push(NetworkInterface::new(
                                 (index - 1) as u8,
                                 src_addr,
                                 dest_addr,
@@ -102,22 +104,25 @@ impl Node {
                         }
 
                         // insert into routing table
-                        node.insert_route(Route {
-                            dst_addr: src_addr,
-                            next_hop: src_addr,
-                            cost: 0,
-                            changed: false,
-                        })
+                        insert_route(
+                            Arc::clone(&node.routing_table),
+                            Route {
+                                dst_addr: src_addr,
+                                next_hop: src_addr,
+                                cost: 0,
+                                changed: false,
+                            },
+                        )
                     }
                 }
 
                 // TODO: REMOVE THIS IS JUST A TEST
-                node.register_handler(200, rip_handler);
+                register_handler(Arc::clone(&node.handlers), 200, rip_handler);
 
                 thread::sleep(std::time::Duration::from_secs(2));
 
                 // Send RIP Request to each of its net interfaces (i.e. neighbors)
-                for dest_if in &node.interfaces {
+                for dest_if in &*interfaces {
                     let initial_route = RouteEntry::DUMMY_ROUTE;
                     let rip_msg = RIPMessage::new(RIP_REQUEST, 1, vec![initial_route]);
                     send_rip_message(dest_if, rip_msg)?;
@@ -127,7 +132,7 @@ impl Node {
                 // TODO: only one listener, or multiple?
                 let (tx, rx) = channel::<IPPacket>();
 
-                for net_if in &node.interfaces {
+                for net_if in &*interfaces {
                     let tx = tx.clone();
                     let net_if = net_if.clone();
                     // TODO: store result so we can cancel somewhere
@@ -153,6 +158,9 @@ impl Node {
                         }
                     }
                 });
+
+                // unlock before returning to prevent borrow checker from complaining
+                mem::drop(interfaces);
 
                 Ok(node)
             }
@@ -181,32 +189,13 @@ impl Node {
     // }
 
     /**
-     * Wrapper function to concurrently insert (update) route from routing table.
-     */
-    pub fn insert_route(&mut self, route: Route) {
-        let mut rt = self.routing_table.lock().unwrap();
-        rt.insert(route);
-    }
-
-    /**
-     * Register handler for a specific protocol.
-     *
-     * Inputs:
-     * - protocol: the protocol for which a handler should be registered
-     * - handler: the handler for the specific protocol.
-     */
-    pub fn register_handler(&mut self, protocol: u8, handler: Handler) {
-        let mut handlers = self.handlers.lock().unwrap();
-        handlers.insert(protocol, handler);
-    }
-
-    /**
      * Converts network interfaces into a human-readable string.
      */
     pub fn fmt_interfaces(&self) -> String {
         let mut res = String::new();
+        let interfaces = self.interfaces.lock().unwrap();
         res.push_str("id\trem\t\tloc\n");
-        for (index, interface) in self.interfaces.iter().enumerate() {
+        for (index, interface) in interfaces.iter().enumerate() {
             if !interface.link_if.active {
                 continue;
             }
@@ -216,7 +205,7 @@ impl Node {
                     interface.id, interface.dst_addr, interface.src_addr
                 )),
             );
-            if index != self.interfaces.len() - 1 {
+            if index != interfaces.len() - 1 {
                 res.push('\n');
             }
         }
@@ -229,11 +218,12 @@ impl Node {
     pub fn fmt_routes(&self) -> String {
         let mut res = String::new();
         res.push_str("cost\tdst\t\tloc\n");
+        let interfaces = self.interfaces.lock().unwrap();
         let routing_table = self.routing_table.lock().unwrap();
 
         for (index, (_, route)) in routing_table.iter().enumerate() {
             res.push_str(&(format!("{}\t{}\t{}", route.cost, route.dst_addr, route.next_hop)));
-            if index != self.interfaces.len() - 1 {
+            if index != interfaces.len() - 1 {
                 res.push('\n');
             }
         }
@@ -244,24 +234,25 @@ impl Node {
      * Bring the link of an interface "down"
      */
     pub fn interface_link_down(&mut self, id: isize) -> Result<(), Error> {
-        if id < 0 || id as usize >= self.interfaces.len() {
+        let mut interfaces = self.interfaces.lock().unwrap();
+        if id < 0 || id as usize >= interfaces.len() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!(
                     "interface {} out of bounds : (0 to {})",
                     id,
-                    self.interfaces.len()
+                    interfaces.len()
                 ),
             ));
         }
         let id = id as usize;
-        if !self.interfaces[id].link_if.active {
+        if !interfaces[id].link_if.active {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
                 format!("interface {} is down already", id),
             ));
         }
-        self.interfaces[id].link_if.active = false;
+        interfaces[id].link_if.active = false;
         Ok(())
     }
 
@@ -269,26 +260,44 @@ impl Node {
      * Bring the link of an interface "up"
      */
     pub fn interface_link_up(&mut self, id: isize) -> Result<(), Error> {
-        if id < 0 || id as usize >= self.interfaces.len() {
+        let mut interfaces = self.interfaces.lock().unwrap();
+
+        if id < 0 || id as usize >= interfaces.len() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!(
                     "interface {} out of bounds : (0 to {})",
                     id,
-                    self.interfaces.len()
+                    interfaces.len()
                 ),
             ));
         }
         let id = id as usize;
-        if self.interfaces[id].link_if.active {
+        if interfaces[id].link_if.active {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
                 format!("interface {} is up already", id),
             ));
         }
-        self.interfaces[id].link_if.active = true;
+        interfaces[id].link_if.active = true;
         Ok(())
     }
+}
+
+/**
+ * Register handler for a specific protocol.
+ *
+ * Inputs:
+ * - protocol: the protocol for which a handler should be registered
+ * - handler: the handler for the specific protocol.
+ */
+pub fn register_handler(
+    handlers: Arc<Mutex<HashMap<u8, Handler>>>,
+    protocol: u8,
+    handler: Handler,
+) {
+    let mut handlers = handlers.lock().unwrap();
+    handlers.insert(protocol, handler);
 }
 
 /**
