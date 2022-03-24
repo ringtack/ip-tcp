@@ -1,4 +1,5 @@
 use crate::protocol::network::rip::*;
+use crate::protocol::network::test::*;
 use crate::protocol::network::{IPPacket, NetworkInterface, RIP_PROTOCOL, TEST_PROTOCOL};
 use rand::Rng;
 use std::{
@@ -188,8 +189,6 @@ impl Node {
                     continue;
                 }
 
-                println!("got trigger!");
-
                 // now, send updates to all nodes, with processing:
                 // - if a route's metric is INFINITY, mark for deletion
                 // - SH w/ PR
@@ -223,6 +222,13 @@ impl Node {
             handlers.insert(ph.protocol, Arc::clone(&ph.handler));
         }
         // TODO: register test handler
+        handlers.insert(
+            TEST_PROTOCOL,
+            make_test_handler(
+                Arc::clone(&node.interfaces),
+                Arc::clone(&node.routing_table),
+            ),
+        );
         // handlers.insert(...);
         // register rip handler
         handlers.insert(
@@ -418,6 +424,32 @@ impl Node {
             ));
         }
         interfaces[id].link_if.link_up();
+        Ok(())
+    }
+
+    /**
+     * Send data to virtual-ip
+     */
+    pub fn send_data(&mut self, ip: String, protocol: usize, payload: String) -> Result<()> {
+        if protocol != TEST_PROTOCOL.into() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("protocol {} is not valid, use 0 to send data", protocol),
+            ));
+        }
+        let dst_addr = str_2_ipv4(&ip);
+        let routing_table = self.routing_table.lock().unwrap();
+        let interfaces = self.interfaces.lock().unwrap();
+        let nexthop_addr = routing_table.get_route(&dst_addr).next_hop;
+        let nexthop_if_index = in_interfaces(&nexthop_addr, &*interfaces);
+
+        if nexthop_if_index < 0 {
+            return Err(Error::new(ErrorKind::Other, "Destnation not reachable!"));
+        }
+        let nexthop_if_index = nexthop_if_index as usize;
+        let nexthop_if = &interfaces[nexthop_if_index];
+
+        send_test_message(nexthop_if, payload, nexthop_if.src_addr, dst_addr)?;
         Ok(())
     }
 }

@@ -316,7 +316,12 @@ impl RIPMessage {
  */
 pub fn send_rip_message(dest_if: &NetworkInterface, msg: RIPMessage) -> Result<()> {
     let payload = msg.to_bytes();
-    dest_if.send_ip(payload.as_slice(), RIP_PROTOCOL)
+    dest_if.send_ip(
+        payload.as_slice(),
+        RIP_PROTOCOL,
+        dest_if.src_addr,
+        dest_if.dst_addr,
+    )
 }
 
 /**

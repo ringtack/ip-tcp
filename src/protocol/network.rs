@@ -1,10 +1,12 @@
 pub mod rip;
+pub mod test;
 use crate::protocol::link::{LinkInterface, MTU};
 use crate::protocol::network::rip::DEFAULT_TTL;
 use etherparse::{IpNumber, Ipv4Header};
 use std::{
     io::{Error, ErrorKind},
     net,
+    net::Ipv4Addr,
 };
 
 pub const TEST_PROTOCOL: u8 = 0;
@@ -40,21 +42,28 @@ impl IPPacket {
      * Creates a new IP packet.
      *
      * Inputs:
-     * - net_if: The NetworkInterface on which the packet will be sent
+     * - source: the IP Address the packet will is sent from
+     * - destination: the IP Address the packet will be sent to
      * - payload: the payload of the packet
      * - ttl: time to live (usually default = 16)
      *
      * Returns:
      * - an IP Packet!
      */
-    pub fn new(net_if: &NetworkInterface, payload: Vec<u8>, ttl: u8, protocol: u8) -> IPPacket {
+    pub fn new(
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        payload: Vec<u8>,
+        ttl: u8,
+        protocol: u8,
+    ) -> IPPacket {
         let mut packet = IPPacket {
             header: Ipv4Header::new(
                 payload.len() as u16,
                 ttl,
                 IpNumber::IPv4, // dummy value, set later
-                net_if.src_addr.octets(),
-                net_if.dst_addr.octets(),
+                source.octets(),
+                destination.octets(),
             ),
             payload,
         };
@@ -104,11 +113,17 @@ impl NetworkInterface {
      * Returns:
      * - Whether operation was successful or not
      */
-    pub fn send_ip(&self, payload: &[u8], protocol: u8) -> Result<(), Error> {
+    pub fn send_ip(
+        &self,
+        payload: &[u8],
+        protocol: u8,
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+    ) -> Result<(), Error> {
         let mut buf = Vec::<u8>::with_capacity(payload.len());
         buf.extend_from_slice(payload);
         // make packet
-        let packet = IPPacket::new(self, buf, DEFAULT_TTL, protocol);
+        let packet = IPPacket::new(source, destination, buf, DEFAULT_TTL, protocol);
 
         // convert packet into bytes
         let mut header_bytes = Vec::<u8>::with_capacity(packet.header.header_len());
