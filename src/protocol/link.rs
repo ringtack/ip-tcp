@@ -75,10 +75,8 @@ impl LinkInterface {
     ) -> Result<usize, Error> {
         // if either current or dest link is down, don't send
         if !self.active {
-            return Err(Error::new(
-                ErrorKind::NotConnected,
-                "sending to unreachable address",
-            ));
+            // return Err(Error::new(ErrorKind::NotConnected, "link interface down"));
+            return Ok(0);
         }
         // if payload larger than MTU, don't send
         if payload.len() > MTU {

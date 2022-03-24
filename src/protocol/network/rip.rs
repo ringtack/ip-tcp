@@ -354,6 +354,9 @@ pub fn recv_rip_message(packet: &IPPacket) -> Result<RIPMessage> {
     Ok(msg)
 }
 
+/**
+ * Checks if address is destination of a local interface.
+ */
 pub fn in_interfaces(addr: &Ipv4Addr, interfaces: &[NetworkInterface]) -> isize {
     let mut in_ifs = -1;
 

@@ -35,9 +35,6 @@ pub struct ProtocolHandler {
  * - receiver: Receiver channel on which Senders send messages.
  */
 pub struct Node {
-    // interfaces: Vec<NetworkInterface>,
-    // routing_table: RoutingTable,
-    // handlers: HashMap<u8, Handler>,
     interfaces: Arc<Mutex<Vec<NetworkInterface>>>,
     routing_table: Arc<Mutex<RoutingTable>>,
     handlers: Arc<Mutex<HashMap<u8, Handler>>>,
@@ -151,7 +148,6 @@ impl Node {
         thread::spawn(move || {
             let mut rng = rand::thread_rng();
             loop {
-                // TODO: should I do this?
                 // Accumulate messages for somewhere between 200-1000ms; RFC recommends
                 // 1-5s
                 let start_time = Instant::now();
@@ -221,7 +217,7 @@ impl Node {
         for ph in default_handlers {
             handlers.insert(ph.protocol, Arc::clone(&ph.handler));
         }
-        // TODO: register test handler
+        // register test handler
         handlers.insert(
             TEST_PROTOCOL,
             make_test_handler(
@@ -229,7 +225,6 @@ impl Node {
                 Arc::clone(&node.routing_table),
             ),
         );
-        // handlers.insert(...);
         // register rip handler
         handlers.insert(
             RIP_PROTOCOL,
@@ -268,7 +263,6 @@ impl Node {
         });
 
         // Initiate thread to listen for incoming packets
-        // TODO: only one listener, or multiple?
         let (tx, rx) = channel::<IPPacket>();
 
         for net_if in &*interfaces {
@@ -301,7 +295,6 @@ impl Node {
                 }
             }
         });
-
         // unlock before returning to prevent borrow checker from complaining
         mem::drop(interfaces);
 
@@ -328,8 +321,18 @@ impl Node {
         Arc::clone(&self.routing_table)
     }
 
-    pub fn get_handlers(&self) -> Arc<Mutex<HashMap<u8, Handler>>> {
-        Arc::clone(&self.handlers)
+    // pub fn get_handlers(&self) -> Arc<Mutex<HashMap<u8, Handler>>> {
+    // Arc::clone(&self.handlers)
+    // }
+
+    pub fn invoke_handler(&self, protocol: u8, packet: IPPacket) -> Result<()> {
+        let handlers = self.handlers.lock().unwrap();
+        if handlers.contains_key(&protocol) {
+            let mut handler = handlers[&protocol].lock().unwrap();
+            handler(packet)?;
+        }
+
+        Ok(())
     }
 
     /**
@@ -428,29 +431,47 @@ impl Node {
     }
 
     /**
-     * Send data to virtual-ip
+     * Send data with specified protocol
      */
-    pub fn send_data(&mut self, ip: String, protocol: usize, payload: String) -> Result<()> {
-        if protocol != TEST_PROTOCOL.into() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("protocol {} is not valid, use 0 to send data", protocol),
-            ));
-        }
+    pub fn send_data(&mut self, ip: String, protocol: u8, payload: String) -> Result<()> {
         let dst_addr = str_2_ipv4(&ip);
-        let routing_table = self.routing_table.lock().unwrap();
+
+        // find local network interface associated with destination
         let interfaces = self.interfaces.lock().unwrap();
-        let nexthop_addr = routing_table.get_route(&dst_addr).next_hop;
-        let nexthop_if_index = in_interfaces(&nexthop_addr, &*interfaces);
+        // if on local net, pass off to handlers
+        if let Some(index) = if_local(&dst_addr, &*interfaces) {
+            // make IP packet
+            let local_if = &interfaces[index];
+            let packet = IPPacket::new(
+                local_if.src_addr,
+                dst_addr,
+                payload.as_bytes().into(),
+                DEFAULT_TTL,
+                protocol,
+            );
 
-        if nexthop_if_index < 0 {
-            return Err(Error::new(ErrorKind::Other, "Destnation not reachable!"));
+            // don't need lock anymore
+            mem::drop(interfaces);
+            // invoke handler
+            return self.invoke_handler(protocol, packet);
         }
-        let nexthop_if_index = nexthop_if_index as usize;
-        let nexthop_if = &interfaces[nexthop_if_index];
 
-        send_test_message(nexthop_if, payload, nexthop_if.src_addr, dst_addr)?;
-        Ok(())
+        let routing_table = self.routing_table.lock().unwrap();
+        // check if one of the destinations
+        if !routing_table.has_dst(&dst_addr) {
+            return Err(Error::new(ErrorKind::Other, "Destination not reachable!"));
+        }
+
+        let gateway_addr = routing_table.get_route(&dst_addr).gateway;
+        // ensure that gateway is actually a local interface
+        if let Some(gateway_if_index) = if_local(&gateway_addr, &*interfaces) {
+            let nexthop_if = &interfaces[gateway_if_index];
+
+            // make IP packet and send
+            nexthop_if.send_ip(payload.as_bytes(), protocol, nexthop_if.src_addr, dst_addr)
+        } else {
+            Err(Error::new(ErrorKind::Other, "Destination not reachable!"))
+        }
     }
 }
 

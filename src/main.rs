@@ -5,45 +5,25 @@ use clap::Parser;
 use node::*;
 extern crate shrust;
 use shrust::{Shell, ShellIO};
-use std::io::{prelude::*, Error};
+use std::io::prelude::*;
 use std::process;
-use std::sync::{Arc, Mutex};
-
-use crate::protocol::network::{rip::*, *};
 
 #[derive(Parser)]
 struct Args {
     linksfile: String,
 }
 
-// TODO: REMOVE THIS IS JUST A TEST
-fn rip_handler(packet: IPPacket) -> Result<(), Error> {
-    let msg = recv_rip_message(&packet);
-    println!("Message: {:?}", msg);
-    Ok(())
-}
-
 fn main() {
     let args = Args::parse();
 
-    let ph = ProtocolHandler {
-        protocol: RIP_PROTOCOL,
-        handler: Arc::new(Mutex::new(rip_handler)),
-    };
-
     // Attempt to make a node
-    let node = match Node::new(args.linksfile, vec![ph]) {
+    let node = match Node::new(args.linksfile, vec![]) {
         Ok(node) => node,
         Err(e) => {
             eprintln!("{}", e);
             process::exit(1);
         }
     };
-
-    // node.register_handler(
-    // RIP_PROTOCOL,
-    // make_rip_handler(node.get_interfaces(), node.get_routing_table()),
-    // );
 
     let mut shell = Shell::new(node);
     shell.new_command_noargs("help", "Print this list of commands", |io, _| {
@@ -124,15 +104,12 @@ fn main() {
     });
 
     shell.new_command("send", "Send an IP packet", 3, |io, node, s| {
-        writeln!(io, "Send {}", s[0])?;
-        match s[1].parse::<usize>() {
+        match s[1].parse::<u8>() {
             Ok(protocol) => match node.send_data(s[0].to_string(), protocol, s[2].to_string()) {
                 Err(err) => {
                     writeln!(io, "{}", err)?;
                 }
-                Ok(()) => {
-                    writeln!(io, "sent {} to {}", s[2], s[0])?;
-                }
+                Ok(()) => {}
             },
             Err(_) => writeln!(io, "syntax error (usage: up [interface])")?,
         }
