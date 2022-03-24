@@ -492,9 +492,12 @@ impl Node {
         let routing_table = self.routing_table.lock().unwrap();
 
         for (index, (_, route)) in routing_table.iter().enumerate() {
-            res.push_str(&(format!("{}\t{}\t{}", route.cost, route.dst_addr, route.gateway)));
-            if index != routing_table.size() - 1 {
-                res.push('\n');
+            // only display if cost is not INFINITY
+            if route.cost != INFINITY {
+                res.push_str(&(format!("{}\t{}\t{}", route.cost, route.dst_addr, route.gateway)));
+                if index != routing_table.size() - 1 {
+                    res.push('\n');
+                }
             }
         }
         res
