@@ -121,7 +121,7 @@ impl RoutingTable {
     }
 
     pub fn insert(&mut self, route: Route) -> Result<()> {
-        match self.size() < MAX_ROUTES {
+        match self.has_dst(&route.dst_addr) || self.size() < MAX_ROUTES {
             true => {
                 self.routes.insert(route.dst_addr, route);
                 Ok(())
@@ -456,6 +456,8 @@ pub fn make_rip_handler(
         let remote_addr = Ipv4Addr::from(packet.header.source);
         let gateway_addr = Ipv4Addr::from(packet.header.destination);
 
+        // println!("Remote: {}\tGateway: {}\n", remote_addr, gateway_addr);
+
         // check that source addr is one of the destination interfaces
         let src_if_index = in_interfaces(&remote_addr, &*interfaces);
         if src_if_index < 0 {
@@ -468,6 +470,8 @@ pub fn make_rip_handler(
 
         // first, attempt to parse into rip message; validates that protocol is right
         let msg = recv_rip_message(&packet)?;
+
+        // println!("{}", msg);
 
         // lock routing table; may need to process
         let mut routing_table = routing_table.lock().unwrap();
@@ -526,6 +530,7 @@ pub fn make_rip_handler(
                         continue;
                     }
                 }
+
                 // final destination address of this entry
                 let dst_addr = Ipv4Addr::from(entry.address);
                 // if valid, update metric
@@ -553,6 +558,11 @@ pub fn make_rip_handler(
                 } else {
                     // get copy of route; will change
                     let mut route = routing_table.get_route(&dst_addr);
+                    // if next hop's address == E's src addr, reinitialize timeout
+                    if route.next_hop == remote_addr {
+                        route.timer = Instant::now();
+                        routing_table.insert(route)?;
+                    }
                     // if (metrics diff and E's src addr == next hop addr) OR (new
                     // metric < curr metric)
                     if (new_metric != route.cost && route.next_hop == remote_addr)
@@ -568,6 +578,7 @@ pub fn make_rip_handler(
                         // for infinity issues
                         if new_metric != INFINITY {
                             route.timer = Instant::now();
+                            println!("Timer reinitialized for route {:?}", route);
                         }
                         // update routing table
                         routing_table.insert(route)?;

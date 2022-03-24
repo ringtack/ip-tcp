@@ -6,7 +6,8 @@ use etherparse::{IpNumber, Ipv4Header};
 use std::{
     io::{Error, ErrorKind},
     net,
-    net::Ipv4Addr,
+    net::{Ipv4Addr, SocketAddrV4},
+    sync::atomic::Ordering,
 };
 
 pub const TEST_PROTOCOL: u8 = 0;
@@ -104,6 +105,13 @@ impl NetworkInterface {
     }
 
     /**
+     * Checks if network interface is active.
+     */
+    pub fn is_active(&self) -> bool {
+        self.link_if.active.load(Ordering::Relaxed)
+    }
+
+    /**
      * Sends an IP packet with the given payload.
      *
      * Inputs:
@@ -145,10 +153,10 @@ impl NetworkInterface {
      * Returns:
      * - A Result<IPPacket, Error> with the received IP packet, or an error
      */
-    pub fn recv_ip(&self) -> Result<IPPacket, Error> {
+    pub fn recv_ip(&self) -> Result<(IPPacket, SocketAddrV4), Error> {
         let mut buf: [u8; MTU] = [0; MTU];
         // get L2 payload
-        let (num_bytes, _) = self.link_if.recv_link_frame(&mut buf)?;
+        let (num_bytes, src_addr) = self.link_if.recv_link_frame(&mut buf)?;
         // custom handling (since from_slice gives a weird error :/)
         match Ipv4Header::from_slice(&buf) {
             Ok((header, buf)) => {
@@ -161,9 +169,45 @@ impl NetworkInterface {
                 let mut payload = Vec::<u8>::with_capacity(num_bytes);
                 payload.extend_from_slice(&buf[..num_bytes]);
                 // return packet
-                Ok(IPPacket { header, payload })
+                Ok((IPPacket { header, payload }, src_addr))
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e.to_string())),
         }
     }
+}
+
+/**
+ * Checks if address is a local interface.
+ *
+ * Inputs:
+ * - addr: the address to check if is a gateway address on an interface.
+ * - interfaces: a list of interfaces
+ *
+ * Returns:
+ * - Option<usize> of the index of the local interface, or None
+ */
+pub fn if_local(addr: &Ipv4Addr, interfaces: &[NetworkInterface]) -> Option<usize> {
+    for (i, net_if) in interfaces.iter().enumerate() {
+        if net_if.src_addr == *addr {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/**
+ * Checks if link interface is active.
+ *
+ * Inputs:
+ * - src_link_addr: address from which we got the packet to check
+ * - interfaces: a list of interfaces
+ */
+pub fn gateway_active(src_link_addr: &SocketAddrV4, interfaces: &[NetworkInterface]) -> bool {
+    for net_if in interfaces.iter() {
+        if net_if.link_if.dst_link_addr == *src_link_addr {
+            return net_if.is_active();
+        }
+    }
+
+    false
 }

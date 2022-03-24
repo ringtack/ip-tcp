@@ -1,5 +1,9 @@
 use std::io::{Error, ErrorKind};
 use std::net::{SocketAddr::*, SocketAddrV4, UdpSocket};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 pub const MTU: usize = 1400;
 
@@ -12,9 +16,9 @@ pub const MTU: usize = 1400;
  * - active: whether link interface is on or off
  */
 pub struct LinkInterface {
-    src_link: UdpSocket,         // SOURCE SOCKET
-    dst_link_addr: SocketAddrV4, // DESTINATION ADDRESS
-    pub active: bool,
+    pub src_link: UdpSocket,         // SOURCE SOCKET
+    pub dst_link_addr: SocketAddrV4, // DESTINATION ADDRESS
+    pub active: Arc<AtomicBool>,
 }
 
 /**
@@ -25,7 +29,7 @@ impl Clone for LinkInterface {
         LinkInterface {
             src_link: self.src_link.try_clone().unwrap(),
             dst_link_addr: self.dst_link_addr,
-            active: self.active,
+            active: Arc::clone(&self.active),
         }
     }
 }
@@ -40,7 +44,7 @@ impl LinkInterface {
         Ok(LinkInterface {
             src_link,
             dst_link_addr: dst_addr,
-            active: true,
+            active: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -48,14 +52,14 @@ impl LinkInterface {
      * Enables the link interface.
      */
     pub fn link_up(&mut self) {
-        self.active = true;
+        self.active.store(true, Ordering::Relaxed);
     }
 
     /**
      * Enables the link interface.
      */
     pub fn link_down(&mut self) {
-        self.active = false;
+        self.active.store(false, Ordering::Relaxed);
     }
 
     /**
@@ -74,15 +78,13 @@ impl LinkInterface {
         payload: &[u8],
     ) -> Result<usize, Error> {
         // if either current or dest link is down, don't send
-        if !self.active {
-            // return Err(Error::new(ErrorKind::NotConnected, "link interface down"));
-            return Ok(0);
+        if !self.active.load(Ordering::Relaxed) {
+            return Err(Error::new(ErrorKind::NotConnected, "link interface down"));
         }
         // if payload larger than MTU, don't send
         if payload.len() > MTU {
             return Err(Error::new(ErrorKind::InvalidData, "payload too large"));
         }
-        // println!("Sending frame to {}...", self.dst_link_addr);
         self.src_link.send_to(payload, self.dst_link_addr)
     }
 
@@ -95,7 +97,7 @@ impl LinkInterface {
      */
     pub fn recv_link_frame(&self, payload: &mut [u8; MTU]) -> Result<(usize, SocketAddrV4), Error> {
         // if locally not active, return an error
-        if !self.active {
+        if !self.active.load(Ordering::Relaxed) {
             return Err(Error::new(ErrorKind::NotConnected, "Link is down."));
         }
         // store payload
@@ -104,6 +106,7 @@ impl LinkInterface {
         if num_bytes > MTU {
             return Err(Error::new(ErrorKind::Other, "received too many bytes."));
         }
+
         // coerce into SocketAddrV4
         let src_addr = match src_addr {
             V4(addr) => addr,

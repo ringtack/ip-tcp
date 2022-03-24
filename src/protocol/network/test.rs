@@ -1,5 +1,5 @@
 use crate::protocol::network::rip::*;
-use crate::protocol::network::{IPPacket, NetworkInterface, TEST_PROTOCOL};
+use crate::protocol::network::*;
 use etherparse::Ipv4Header;
 use std::io::{Error, ErrorKind, Result};
 use std::net::Ipv4Addr;
@@ -34,18 +34,6 @@ pub fn recv_test_message(packet: &IPPacket) -> Result<(Ipv4Header, String)> {
     Ok((packet.header.clone(), msg))
 }
 
-/**
- * Checks if address is a local interface.
- */
-pub fn if_local(addr: &Ipv4Addr, interfaces: &[NetworkInterface]) -> Option<usize> {
-    for (i, net_if) in interfaces.iter().enumerate() {
-        if net_if.src_addr == *addr {
-            return Some(i);
-        }
-    }
-    None
-}
-
 pub fn make_test_handler(
     interfaces: Arc<Mutex<Vec<NetworkInterface>>>,
     routing_table: Arc<Mutex<RoutingTable>>,
@@ -77,7 +65,7 @@ pub fn make_test_handler(
             if let Some(gateway_if_index) = if_local(&gateway_addr, &*interfaces) {
                 let nexthop_if = &interfaces[gateway_if_index];
 
-                println!("[test: make_test_handler] transfered message");
+                // println!("[test: make_test_handler] transfered message");
                 send_test_message(nexthop_if, msg, src_addr, dst_addr)?;
             } else {
                 return Err(Error::new(

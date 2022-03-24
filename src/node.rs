@@ -1,6 +1,6 @@
 use crate::protocol::network::rip::*;
 use crate::protocol::network::test::*;
-use crate::protocol::network::{IPPacket, NetworkInterface, RIP_PROTOCOL, TEST_PROTOCOL};
+use crate::protocol::network::*;
 use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
@@ -10,6 +10,7 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     path::Path,
     sync::{
+        atomic::Ordering,
         mpsc::{channel, RecvTimeoutError},
         Arc, Mutex,
     },
@@ -120,20 +121,27 @@ impl Node {
             )?;
         }
 
-        // Set up timeout thread (rx will be used later for trigger response thread)
+        // Set up timeout/cleanup thread (rx will be used later for trigger response thread)
         let (tx, rx) = channel::<Ipv4Addr>();
         let rt = Arc::clone(&node.routing_table);
         let tx1 = tx.clone();
         thread::spawn(move || loop {
-            // every CHECK_TIMEOUTS seconds, scan list for timeouts
+            // every CHECK_TIMEOUTS seconds, scan list for timeouts/cleanups
             thread::sleep(Duration::from_secs(CHECK_TIMEOUTS));
 
+            let timeout = Duration::from_secs(TIMEOUT);
             let mut rt = rt.lock().unwrap();
             // for each route:
             for (dst_addr, route) in rt.iter_mut() {
-                // if not a local entry (i.e. cost > 0) and time since now and last updated >
-                // TIMEOUT, notify trigger of timeout
-                if route.cost > 0 && route.timer.elapsed() > Duration::from_secs(TIMEOUT) {
+                // if (not a local entry (i.e. cost > 0) and time since now and last updated >
+                // TIMEOUT) OR (if cost is INFINITY), notify trigger of timeout
+                if (route.cost > 0 && route.timer.elapsed() > timeout) || route.cost == INFINITY {
+                    println!(
+                        "Route to {} expired ({:?})... cleaning up",
+                        route.dst_addr,
+                        route.timer.elapsed()
+                    );
+
                     // before notifying, need to mark route as changed and set metric to INFINITY
                     route.changed = true;
                     route.cost = INFINITY;
@@ -148,7 +156,7 @@ impl Node {
         thread::spawn(move || {
             let mut rng = rand::thread_rng();
             loop {
-                // Accumulate messages for somewhere between 200-1000ms; RFC recommends
+                // Accumulate messages for somewhere between 200-500ms; RFC recommends
                 // 1-5s
                 let start_time = Instant::now();
                 let get_duration = Duration::from_millis(rng.gen_range(200..500));
@@ -194,9 +202,14 @@ impl Node {
                 // for each network interface, process then send
                 for dst_if in &*ifs {
                     match RoutingTable::process_updates(&updated_routes, &mut to_delete, dst_if) {
-                        // if properly converted, send RIP message
-                        Ok(route_entries) => send_route_entries(dst_if, route_entries),
-                        // otherwise, dislpay error
+                        // if properly converted and not empty, send RIP message
+                        Ok(route_entries) => {
+                            if !route_entries.is_empty() {
+                                // println!("sending to {}", dst_if.dst_addr);
+                                send_route_entries(dst_if, route_entries)
+                            }
+                        }
+                        // otherwise, display error
                         Err(e) => eprintln!("{}", e),
                     }
                 }
@@ -262,19 +275,37 @@ impl Node {
             }
         });
 
-        // Initiate thread to listen for incoming packets
+        // Initiate thread to listen for incoming packets; rx will be used to receive packets
         let (tx, rx) = channel::<IPPacket>();
-
         for net_if in &*interfaces {
+            let ifs = Arc::clone(&node.interfaces);
             let tx = tx.clone();
             let net_if = net_if.clone();
             // TODO: store result so we can cancel somewhere
             thread::spawn(move || {
                 // infinitely listen for incoming messages
                 loop {
-                    // TODO: error handling
-                    let packet = net_if.recv_ip().unwrap();
-                    tx.send(packet).unwrap();
+                    match net_if.recv_ip() {
+                        Ok((packet, src_addr)) => {
+                            // only forward if the actual link interface was active
+                            // TODO: this should really be a part of the link interface... Alas,
+                            // since only one socket for every link interface, we're stuck with a
+                            // check here. I HATE THE UDP SOCKET ABSTRACTION AHHH
+                            let ifs = ifs.lock().unwrap();
+                            if gateway_active(&src_addr, &*ifs) {
+                                tx.send(packet).unwrap()
+                            }
+                        }
+                        Err(e) => match e.kind() {
+                            // if not connected, link is down, so sleep for a bit
+                            ErrorKind::NotConnected => {
+                                thread::sleep(Duration::from_millis(100));
+                                // eprintln!("link not up");
+                            }
+                            // otherwise, probably something wrong with packet, so emit error
+                            _ => eprintln!("{}", e),
+                        },
+                    }
                 }
             });
         }
@@ -297,6 +328,9 @@ impl Node {
         });
         // unlock before returning to prevent borrow checker from complaining
         mem::drop(interfaces);
+
+        // print interfaces
+        println!("{}", node.fmt_startup_interfaces());
 
         Ok(node)
     }
@@ -321,9 +355,9 @@ impl Node {
         Arc::clone(&self.routing_table)
     }
 
-    // pub fn get_handlers(&self) -> Arc<Mutex<HashMap<u8, Handler>>> {
-    // Arc::clone(&self.handlers)
-    // }
+    pub fn get_handlers(&self) -> Arc<Mutex<HashMap<u8, Handler>>> {
+        Arc::clone(&self.handlers)
+    }
 
     pub fn invoke_handler(&self, protocol: u8, packet: IPPacket) -> Result<()> {
         let handlers = self.handlers.lock().unwrap();
@@ -336,6 +370,21 @@ impl Node {
     }
 
     /**
+     * Converts network interfaces into a string to display on startup.
+     */
+    pub fn fmt_startup_interfaces(&self) -> String {
+        let mut res = String::new();
+        let interfaces = self.interfaces.lock().unwrap();
+        for (index, interface) in interfaces.iter().enumerate() {
+            res.push_str(&(format!("{}:\t{}", interface.id, interface.src_addr)));
+            if index != interfaces.len() - 1 {
+                res.push('\n');
+            }
+        }
+        res
+    }
+
+    /**
      * Converts network interfaces into a human-readable string.
      */
     pub fn fmt_interfaces(&self) -> String {
@@ -343,7 +392,7 @@ impl Node {
         let interfaces = self.interfaces.lock().unwrap();
         res.push_str("id\trem\t\tloc\n");
         for (index, interface) in interfaces.iter().enumerate() {
-            if !interface.link_if.active {
+            if !interface.link_if.active.load(Ordering::Relaxed) {
                 continue;
             }
             res.push_str(
@@ -382,6 +431,8 @@ impl Node {
      */
     pub fn interface_link_down(&mut self, id: isize) -> Result<()> {
         let mut interfaces = self.interfaces.lock().unwrap();
+
+        // check if is valid interface
         if id < 0 || id as usize >= interfaces.len() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -392,14 +443,30 @@ impl Node {
                 ),
             ));
         }
-        let id = id as usize;
-        if !interfaces[id].link_if.active {
+
+        // get mutable reference to interface we're bringing down
+        let down_if = &mut interfaces[id as usize];
+        if !down_if.link_if.active.load(Ordering::Relaxed) {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
                 format!("interface {} is down already", id),
             ));
         }
-        interfaces[id].link_if.link_down();
+        down_if.link_if.link_down();
+
+        // after bringing down, set all route costs with this gateway interface to INFINITY;
+        // cleanup thread will pick up and delete
+        let mut routing_table = self.routing_table.lock().unwrap();
+        for (_, route) in routing_table.iter_mut() {
+            // if gateway shares same source interface as this interface, "bring down"
+            if route.gateway == down_if.src_addr {
+                route.cost = INFINITY;
+                route.changed = true;
+            }
+        }
+        // Note that this doesn't actually inform direct neighbors about the change until 12s
+        // later; can try to remedy by sleeping for 1s, but not really optimal
+
         Ok(())
     }
 
@@ -409,6 +476,7 @@ impl Node {
     pub fn interface_link_up(&mut self, id: isize) -> Result<()> {
         let mut interfaces = self.interfaces.lock().unwrap();
 
+        // check if valid interface
         if id < 0 || id as usize >= interfaces.len() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -419,14 +487,31 @@ impl Node {
                 ),
             ));
         }
-        let id = id as usize;
-        if interfaces[id].link_if.active {
+
+        // check if already up
+        let up_if = &mut interfaces[id as usize];
+        if up_if.link_if.active.load(Ordering::Relaxed) {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
                 format!("interface {} is up already", id),
             ));
         }
-        interfaces[id].link_if.link_up();
+        up_if.link_if.link_up();
+
+        // add to routing table this local route; will send out in next periodic update
+        // TODO: send out as triggered update: do this by adding the trigger channel as a field to
+        // node
+        // TODO: so apparently this does get sent out almost instantly... howe LOL
+        let mut routing_table = self.routing_table.lock().unwrap();
+        routing_table.insert(Route {
+            dst_addr: up_if.src_addr,
+            gateway: up_if.src_addr,
+            next_hop: up_if.src_addr,
+            cost: 0,
+            changed: false,
+            mask: INIT_MASK,
+            timer: Instant::now(),
+        })?;
         Ok(())
     }
 
@@ -449,9 +534,9 @@ impl Node {
                 DEFAULT_TTL,
                 protocol,
             );
-
             // don't need lock anymore
             mem::drop(interfaces);
+
             // invoke handler
             return self.invoke_handler(protocol, packet);
         }
@@ -467,6 +552,11 @@ impl Node {
         if let Some(gateway_if_index) = if_local(&gateway_addr, &*interfaces) {
             let nexthop_if = &interfaces[gateway_if_index];
 
+            // println!(
+            // "Sending data from {} to {}...",
+            // nexthop_if.src_addr, dst_addr
+            // );
+
             // make IP packet and send
             nexthop_if.send_ip(payload.as_bytes(), protocol, nexthop_if.src_addr, dst_addr)
         } else {
@@ -481,11 +571,11 @@ impl Node {
 fn send_route_entries(dst_if: &NetworkInterface, route_entries: Vec<RouteEntry>) {
     if !route_entries.is_empty() {
         let msg = RIPMessage::new(RIP_RESPONSE, route_entries.len() as u16, route_entries);
+
+        // println!("Sending message: {}", msg);
+
         // custom match since doesn't return
-        match send_rip_message(dst_if, msg) {
-            Ok(()) => (),
-            Err(e) => eprintln!("{}", e),
-        }
+        if let Ok(()) = send_rip_message(dst_if, msg) {}
     }
 }
 
