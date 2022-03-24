@@ -282,10 +282,13 @@ impl Node {
         // move references into thread
         node.thrs.push(thread::spawn(move || loop {
             // if stopped, we're finished
-            if stopped.load(Ordering::Relaxed) {
-                return;
+            // sleep for 1s at a time, checking if we should terminate
+            for _ in 0..5 {
+                if stopped.load(Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_secs(UPDATE_TIME / 5));
             }
-            thread::sleep(Duration::from_secs(UPDATE_TIME)); // update every 5 seconds
 
             let routing_table = rt.lock().unwrap();
             let interfaces = ifs.lock().unwrap();
