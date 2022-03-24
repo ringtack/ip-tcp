@@ -426,11 +426,13 @@ impl Node {
  * Helper function to send route entries to a destination interface.
  */
 fn send_route_entries(dst_if: &NetworkInterface, route_entries: Vec<RouteEntry>) {
-    let msg = RIPMessage::new(RIP_RESPONSE, route_entries.len() as u16, route_entries);
-    // custom match since doesn't return
-    match send_rip_message(dst_if, msg) {
-        Ok(()) => (),
-        Err(e) => eprintln!("{}", e),
+    if !route_entries.is_empty() {
+        let msg = RIPMessage::new(RIP_RESPONSE, route_entries.len() as u16, route_entries);
+        // custom match since doesn't return
+        match send_rip_message(dst_if, msg) {
+            Ok(()) => (),
+            Err(e) => eprintln!("{}", e),
+        }
     }
 }
 
