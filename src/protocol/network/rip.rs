@@ -18,7 +18,7 @@ pub const INIT_MASK: u32 = u32::MAX;
 pub const RIP_REQUEST: u16 = 1;
 pub const RIP_RESPONSE: u16 = 2;
 
-pub const CHECK_TIMEOUTS: u64 = 1;
+pub const CHECK_TIMEOUTS: u64 = 500;
 pub const UPDATE_TIME: u64 = 5;
 pub const TIMEOUT: u64 = 12;
 

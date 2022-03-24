@@ -126,8 +126,8 @@ impl Node {
         let rt = Arc::clone(&node.routing_table);
         let tx1 = tx.clone();
         thread::spawn(move || loop {
-            // every CHECK_TIMEOUTS seconds, scan list for timeouts/cleanups
-            thread::sleep(Duration::from_secs(CHECK_TIMEOUTS));
+            // every CHECK_TIMEOUTS (500) milliseconds, scan list for timeouts/cleanups
+            thread::sleep(Duration::from_millis(CHECK_TIMEOUTS));
 
             let timeout = Duration::from_secs(TIMEOUT);
             let mut rt = rt.lock().unwrap();
