@@ -137,7 +137,10 @@ impl NetworkInterface {
         // custom handling (since from_slice gives a weird error :/)
         match Ipv4Header::from_slice(&buf) {
             Ok((header, buf)) => {
-                // TODO: validation
+                // checksum validation
+                if header.calc_header_checksum().unwrap() != header.header_checksum {
+                    return Err(Error::new(ErrorKind::Other, "checksum validation failed"));
+                }
 
                 // get IP payload from L2 payload
                 let mut payload = Vec::<u8>::with_capacity(num_bytes);
