@@ -97,7 +97,12 @@ impl RoutingTable {
             }
             // SH w/ PR it
             let route_entry = process_route(remote_addr, &route.dst_addr, route)?;
-            entries.push(route_entry);
+            // if not INFINITY, but SH w/ PR makes it so, don't send
+            if route.cost != INFINITY && route_entry.cost == INFINITY {
+                continue;
+            } else {
+                entries.push(route_entry);
+            }
         }
 
         Ok(entries)
@@ -422,6 +427,7 @@ pub fn process_route(
     // here next hop is the REMOTE VIRTUAL IP ADDRESS of the interface
     // if next hop is same as source, poison it
     let cost = if route.next_hop == *src_addr {
+        // println!("get poisoned (next_hop = src = {})", src_addr);
         INFINITY
     } else {
         route.cost as u32
@@ -560,7 +566,7 @@ pub fn make_rip_handler(
                         if new_metric != INFINITY {
                             route.timer = Instant::now();
                         }
-                        // otherwise, update routing table
+                        // update routing table
                         routing_table.insert(route)?;
 
                         // signal to trigger that something changed (either delete, or update)
