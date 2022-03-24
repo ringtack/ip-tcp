@@ -202,19 +202,19 @@ impl RouteEntry {
         bytes
     }
 
-    /**
+    /*
      * Parses a slice of bytes into a RouteEntry.
      */
-    pub fn from_bytes(mut payload: &[u8]) -> Result<RouteEntry> {
-        let cost = payload.read_u32::<NetworkEndian>()?;
-        let address = payload.read_u32::<NetworkEndian>()?;
-        let mask = payload.read_u32::<NetworkEndian>()?;
-        Ok(RouteEntry {
-            cost,
-            address,
-            mask,
-        })
-    }
+    // pub fn from_bytes(mut payload: &[u8]) -> Result<RouteEntry> {
+    // let cost = payload.read_u32::<NetworkEndian>()?;
+    // let address = payload.read_u32::<NetworkEndian>()?;
+    // let mask = payload.read_u32::<NetworkEndian>()?;
+    // Ok(RouteEntry {
+    // cost,
+    // address,
+    // mask,
+    // })
+    // }
 }
 
 /**
@@ -321,6 +321,7 @@ impl RIPMessage {
  */
 pub fn send_rip_message(dest_if: &NetworkInterface, msg: RIPMessage) -> Result<()> {
     let payload = msg.to_bytes();
+    // println!("Rip message is {} bytes long", payload.len());
     dest_if.send_ip(
         payload.as_slice(),
         RIP_PROTOCOL,
@@ -578,7 +579,7 @@ pub fn make_rip_handler(
                         // for infinity issues
                         if new_metric != INFINITY {
                             route.timer = Instant::now();
-                            println!("Timer reinitialized for route {:?}", route);
+                            // println!("Timer reinitialized for route {:?}", route);
                         }
                         // update routing table
                         routing_table.insert(route)?;

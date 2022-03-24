@@ -67,7 +67,8 @@ fn main() {
         Ok(())
     });
 
-    shell.new_command_noargs("q", "Quit this node", |_, _| {
+    shell.new_command_noargs("q", "Quit this node", |_, node| {
+        node.quit();
         process::exit(0);
     });
 

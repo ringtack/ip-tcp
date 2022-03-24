@@ -156,7 +156,7 @@ impl NetworkInterface {
     pub fn recv_ip(&self) -> Result<(IPPacket, SocketAddrV4), Error> {
         let mut buf: [u8; MTU] = [0; MTU];
         // get L2 payload
-        let (num_bytes, src_addr) = self.link_if.recv_link_frame(&mut buf)?;
+        let (_, src_addr) = self.link_if.recv_link_frame(&mut buf)?;
         // custom handling (since from_slice gives a weird error :/)
         match Ipv4Header::from_slice(&buf) {
             Ok((header, buf)) => {
@@ -165,6 +165,9 @@ impl NetworkInterface {
                     return Err(Error::new(ErrorKind::Other, "checksum validation failed"));
                 }
 
+                // num_bytes is different from link frame's num bytes, since from_slice eats part
+                // of it
+                let num_bytes = buf.len();
                 // get IP payload from L2 payload
                 let mut payload = Vec::<u8>::with_capacity(num_bytes);
                 payload.extend_from_slice(&buf[..num_bytes]);

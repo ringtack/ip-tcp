@@ -6,6 +6,7 @@ use std::sync::{
 };
 
 pub const MTU: usize = 1400;
+pub const READ_TIMEOUT: u64 = 500;
 
 /**
  * Struct representing a Link Interface.
