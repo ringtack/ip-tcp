@@ -82,7 +82,8 @@ impl Node {
             let line = line?;
             let line: Vec<&str> = line.split_whitespace().collect();
             // regardless of source or dest, gets addr:port
-            let sock_addr = SocketAddrV4::new(str_2_ipv4(line[0]), line[1].parse::<u16>().unwrap());
+            let sock_addr =
+                SocketAddrV4::new(str_2_ipv4(line[0])?, line[1].parse::<u16>().unwrap());
 
             // if first line, is source "L2 address"
             if index == 0 {
@@ -95,8 +96,8 @@ impl Node {
 
             // otherwise, make network interface:
             //      <Dest L2 Address> <Dest L2 Port> <Src IF> <Dest IF>
-            let src_addr = str_2_ipv4(line[2]);
-            let dest_addr = str_2_ipv4(line[3]);
+            let src_addr = str_2_ipv4(line[2])?;
+            let dest_addr = str_2_ipv4(line[3])?;
 
             if let Some(sock) = &src_sock {
                 interfaces.push(NetworkInterface::new(
@@ -172,7 +173,7 @@ impl Node {
                         Ok(dst_addr) => {
                             let rt = rt.lock().unwrap();
                             if rt.has_dst(&dst_addr) {
-                                updated_routes.push(rt.get_route(&dst_addr));
+                                updated_routes.push(rt.get_route(&dst_addr).unwrap());
                             }
                         }
                         // in this case, timer up
@@ -437,10 +438,18 @@ impl Node {
                 format!("protocol {} is not valid, use 0 to send data", protocol),
             ));
         }
-        let dst_addr = str_2_ipv4(&ip);
+        let dst_addr = match str_2_ipv4(&ip) {
+            Ok(ip) => ip,
+            Err(_) => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("invalid address: {}", ip),
+                ))
+            }
+        };
         let routing_table = self.routing_table.lock().unwrap();
         let interfaces = self.interfaces.lock().unwrap();
-        let nexthop_addr = routing_table.get_route(&dst_addr).next_hop;
+        let nexthop_addr = routing_table.get_route(&dst_addr)?.next_hop;
         let nexthop_if_index = in_interfaces(&nexthop_addr, &*interfaces);
 
         if nexthop_if_index < 0 {
@@ -482,11 +491,13 @@ where
 /**
  * Converts a string into an IP address.
  */
-fn str_2_ipv4(s: &str) -> Ipv4Addr {
+fn str_2_ipv4(s: &str) -> Result<Ipv4Addr> {
     if s == "localhost" {
-        Ipv4Addr::LOCALHOST
+        Ok(Ipv4Addr::LOCALHOST)
     } else {
-        let s: Vec<u8> = s.split('.').map(|x| x.parse::<u8>().unwrap()).collect();
-        Ipv4Addr::new(s[0], s[1], s[2], s[3])
+        match s.parse::<Ipv4Addr>() {
+            Ok(ip) => Ok(ip),
+            Err(_) => Err(Error::new(ErrorKind::Other, "invalid IP address")),
+        }
     }
 }

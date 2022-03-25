@@ -124,7 +124,6 @@ fn main() {
     });
 
     shell.new_command("send", "Send an IP packet", 3, |io, node, s| {
-        writeln!(io, "Send {}", s[0])?;
         match s[1].parse::<usize>() {
             Ok(protocol) => match node.send_data(s[0].to_string(), protocol, s[2].to_string()) {
                 Err(err) => {
@@ -134,7 +133,7 @@ fn main() {
                     writeln!(io, "sent {} to {}", s[2], s[0])?;
                 }
             },
-            Err(_) => writeln!(io, "syntax error (usage: up [interface])")?,
+            Err(_) => writeln!(io, "syntax error (usage: send [ip] [protocol] [payload])")?,
         }
         Ok(())
     });

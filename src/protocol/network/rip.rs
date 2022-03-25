@@ -116,8 +116,11 @@ impl RoutingTable {
         self.routes.contains_key(dst_addr)
     }
 
-    pub fn get_route(&self, dst_addr: &Ipv4Addr) -> Route {
-        self.routes[dst_addr]
+    pub fn get_route(&self, dst_addr: &Ipv4Addr) -> Result<Route> {
+        if !self.routes.contains_key(dst_addr) {
+            return Err(Error::new(ErrorKind::Other, "unreachable route"));
+        }
+        Ok(self.routes[dst_addr])
     }
 
     pub fn insert(&mut self, route: Route) -> Result<()> {
@@ -549,7 +552,11 @@ pub fn make_rip_handler(
                     }
                 } else {
                     // get copy of route; will change
-                    let mut route = routing_table.get_route(&dst_addr);
+                    //TODO is ? right here
+                    let mut route = match routing_table.get_route(&dst_addr) {
+                        Ok(route) => route,
+                        Err(_) => return Ok(()),
+                    };
                     // if (metrics diff and E's src addr == next hop addr) OR (new
                     // metric < curr metric)
                     if (new_metric != route.cost && route.next_hop == remote_addr)

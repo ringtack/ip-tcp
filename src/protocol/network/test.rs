@@ -57,7 +57,7 @@ pub fn make_test_handler(
             println!("got {} from {}", msg, src_addr);
         } else {
             let routing_table = routing_table.lock().unwrap();
-            let nexthop_addr = routing_table.get_route(&dst_addr).next_hop;
+            let nexthop_addr = routing_table.get_route(&dst_addr)?.next_hop;
 
             let nexthop_if_index = in_interfaces(&nexthop_addr, &*interfaces);
             if nexthop_if_index < 0 {
