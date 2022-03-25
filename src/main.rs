@@ -112,7 +112,7 @@ fn main() {
                 }
                 Ok(()) => {}
             },
-            Err(_) => writeln!(io, "syntax error (usage: up [interface])")?,
+            Err(_) => writeln!(io, "syntax error (usage: send [ip] [protocol] [payload])")?,
         }
         Ok(())
     });

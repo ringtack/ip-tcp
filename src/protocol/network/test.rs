@@ -60,7 +60,7 @@ pub fn make_test_handler(
                 ));
             }
 
-            let gateway_addr = routing_table.get_route(&dst_addr).gateway;
+            let gateway_addr = routing_table.get_route(&dst_addr)?.gateway;
             // ensure that gateway is actually a local interface
             if let Some(gateway_if_index) = if_local(&gateway_addr, &*interfaces) {
                 let nexthop_if = &interfaces[gateway_if_index];

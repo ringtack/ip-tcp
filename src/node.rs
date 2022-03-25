@@ -85,7 +85,8 @@ impl Node {
             let line = line?;
             let line: Vec<&str> = line.split_whitespace().collect();
             // regardless of source or dest, gets addr:port
-            let sock_addr = SocketAddrV4::new(str_2_ipv4(line[0]), line[1].parse::<u16>().unwrap());
+            let sock_addr =
+                SocketAddrV4::new(str_2_ipv4(line[0])?, line[1].parse::<u16>().unwrap());
 
             // if first line, is source "L2 address"
             if index == 0 {
@@ -100,8 +101,8 @@ impl Node {
 
             // otherwise, make network interface:
             //      <Dest L2 Address> <Dest L2 Port> <Src IF> <Dest IF>
-            let src_addr = str_2_ipv4(line[2]);
-            let dest_addr = str_2_ipv4(line[3]);
+            let src_addr = str_2_ipv4(line[2])?;
+            let dest_addr = str_2_ipv4(line[3])?;
 
             if let Some(sock) = &src_sock {
                 interfaces.push(NetworkInterface::new(
@@ -195,7 +196,7 @@ impl Node {
                         Ok(dst_addr) => {
                             let rt = rt.lock().unwrap();
                             if rt.has_dst(&dst_addr) {
-                                updated_routes.push(rt.get_route(&dst_addr));
+                                updated_routes.push(rt.get_route(&dst_addr).unwrap());
                             }
                         }
                         // in this case, timer up
@@ -596,7 +597,7 @@ impl Node {
      * Send data with specified protocol
      */
     pub fn send_data(&mut self, ip: String, protocol: u8, payload: String) -> Result<()> {
-        let dst_addr = str_2_ipv4(&ip);
+        let dst_addr = str_2_ipv4(&ip)?;
 
         // find local network interface associated with destination
         let interfaces = self.interfaces.lock().unwrap();
@@ -624,7 +625,7 @@ impl Node {
             return Err(Error::new(ErrorKind::Other, "Destination not reachable!"));
         }
 
-        let gateway_addr = routing_table.get_route(&dst_addr).gateway;
+        let gateway_addr = routing_table.get_route(&dst_addr)?.gateway;
         // ensure that gateway is actually a local interface
         if let Some(gateway_if_index) = if_local(&gateway_addr, &*interfaces) {
             let nexthop_if = &interfaces[gateway_if_index];
@@ -670,11 +671,13 @@ where
 /**
  * Converts a string into an IP address.
  */
-fn str_2_ipv4(s: &str) -> Ipv4Addr {
+fn str_2_ipv4(s: &str) -> Result<Ipv4Addr> {
     if s == "localhost" {
-        Ipv4Addr::LOCALHOST
+        Ok(Ipv4Addr::LOCALHOST)
     } else {
-        let s: Vec<u8> = s.split('.').map(|x| x.parse::<u8>().unwrap()).collect();
-        Ipv4Addr::new(s[0], s[1], s[2], s[3])
+        match s.parse::<Ipv4Addr>() {
+            Ok(ip) => Ok(ip),
+            Err(_) => Err(Error::new(ErrorKind::Other, "invalid IP address")),
+        }
     }
 }
