@@ -10,6 +10,7 @@ use std::{
     mem,
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     path::Path,
+    process,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{channel, RecvTimeoutError},
@@ -402,8 +403,16 @@ impl Node {
         let msg = RIPMessage::new(RIP_RESPONSE, dead_routes.len() as u16, dead_routes);
         // send dead routes to all interfaces
         for net_if in &*interfaces {
-            send_rip_message(net_if, msg.clone())
-                .expect("Should be able to send RIP message to local IFs!");
+            match send_rip_message(net_if, msg.clone()) {
+                Ok(()) => (),
+                Err(e) => match e.kind() {
+                    ErrorKind::NotConnected => eprintln!("{}", e),
+                    _ => {
+                        eprintln!("Should be able to send exit RIP message! Got error: {}", e);
+                        process::exit(1);
+                    }
+                },
+            }
         }
         // ... aaaand we're done! :D
     }
