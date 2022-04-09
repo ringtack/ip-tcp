@@ -5,7 +5,7 @@ TARGET=ip
 all: build
 
 build:
-	$(CARGO) build
+	CARGO_HOME=.cargo $(CARGO) build
 	cp $(TARGETDIR)/$(TARGET) ./node
 
 clean:
