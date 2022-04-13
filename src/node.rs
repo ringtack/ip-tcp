@@ -79,7 +79,7 @@ impl Node {
         let mut node = Node::new_empty()?;
         let mut interfaces = node.interfaces.lock().unwrap();
         // store src socket; shared across all interfaces
-        let mut src_sock: Option<UdpSocket> = None;
+        let mut src_sock = None;
 
         // iterate through every line
         for (index, line) in lines.enumerate() {
