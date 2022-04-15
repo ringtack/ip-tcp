@@ -2,8 +2,9 @@
 \#*#
 
 
-# Ignore Rust caches
+# Ignore Rust caches/locks
 .cargo
+Cargo.lock
 
 # Ignore build outputs
 target

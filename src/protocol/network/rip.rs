@@ -1,158 +1,32 @@
-use crate::protocol::network::{IPPacket, NetworkInterface, RIP_PROTOCOL};
-use byteorder::*;
-use std::cmp::min;
-use std::collections::hash_map::{Iter, IterMut};
-use std::collections::{HashMap, HashSet};
-use std::fmt::{self, Display};
-use std::io::{Error, ErrorKind, Result};
-use std::mem;
-use std::net::Ipv4Addr;
-use std::sync::{mpsc::Sender, Arc, Mutex};
-use std::time::Instant;
+use crate::protocol::network::{
+    ip_packet::IPPacket,
+    network_interfaces::*,
+    routing_table::{Route, RoutingTable, ROUTE_TIMEOUT},
+    Handler,
+};
 
-pub const MAX_ROUTES: usize = 64;
-pub const DEFAULT_TTL: u8 = 16; // TODO: which value???
+use byteorder::*;
+
+use std::{
+    cmp::min,
+    collections::HashSet,
+    fmt::{self, Display},
+    io::{Error, ErrorKind, Result},
+    mem,
+    net::Ipv4Addr,
+    sync::{mpsc::Sender, Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+pub const DEFAULT_TTL: u8 = 16;
 pub const INFINITY: u32 = 16;
 pub const INIT_MASK: u32 = u32::MAX;
 
+pub const RIP_PROTOCOL: u8 = 200;
 pub const RIP_REQUEST: u16 = 1;
 pub const RIP_RESPONSE: u16 = 2;
 
-pub const CHECK_TIMEOUTS: u64 = 500;
 pub const UPDATE_TIME: u64 = 5;
-pub const TIMEOUT: u64 = 12;
-
-pub type Handler = Arc<Mutex<dyn FnMut(IPPacket) -> Result<()> + Send>>;
-
-/**
- * Struct representing a Route in the RoutingTable.
- *
- * Fields:
- * - dst_addr: the destination address
- * - next_hop: the remote IP address to the next node in the route
- * - gateway: local (gateway) IP address to the next node in the route
- * - cost: the cost to reach the destination
- * - changed: whether this route has been recently changed.
- */
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
-pub struct Route {
-    pub dst_addr: Ipv4Addr,
-    pub gateway: Ipv4Addr,
-    pub next_hop: Ipv4Addr,
-    pub cost: u32,
-    pub changed: bool,
-    pub mask: u32,
-    pub timer: Instant,
-}
-
-/**
- * Routing Table. Maps destination addresses to routes.
- */
-pub struct RoutingTable {
-    routes: HashMap<Ipv4Addr, Route>,
-}
-
-impl RoutingTable {
-    pub fn new() -> RoutingTable {
-        RoutingTable {
-            routes: HashMap::new(),
-        }
-    }
-
-    /**
-     * Converts all routes in the routing table into RouteEntries for RIPMessages. Implements SH w/
-     * PR for the specified network interface.
-     */
-    pub fn get_entries(&self, net_if: &NetworkInterface) -> Result<Vec<RouteEntry>> {
-        let mut entries: Vec<RouteEntry> = Vec::<RouteEntry>::with_capacity(self.size());
-
-        let remote_addr = &net_if.dst_addr;
-        // for each route, process it (SH w/ PR) then add to entries
-        for (dst_addr, route) in self.iter() {
-            // check if net_if's remote_addr is same as route.next_hop; if so, poison it
-            let route_entry = process_route(remote_addr, dst_addr, route)?;
-            entries.push(route_entry);
-        }
-
-        Ok(entries)
-    }
-
-    /**
-     * Converts all provided routes into RouteEntries for RIPMessages, subject to SH w/ PR.
-     * Accumulates which routes need to be deleted.
-     */
-    pub fn process_updates(
-        updated_routes: &[Route],
-        to_delete: &mut HashSet<Ipv4Addr>,
-        net_if: &NetworkInterface,
-    ) -> Result<Vec<RouteEntry>> {
-        let mut entries: Vec<RouteEntry> = Vec::with_capacity(updated_routes.len());
-
-        let remote_addr = &net_if.dst_addr;
-        // for each route, process it (SH w/ PR) then add to entries
-        for route in updated_routes {
-            // if metric is INFINITY, add to deletions
-            if route.cost == INFINITY {
-                to_delete.insert(route.dst_addr);
-            }
-            // SH w/ PR it
-            let route_entry = process_route(remote_addr, &route.dst_addr, route)?;
-            // if not INFINITY, but SH w/ PR makes it so, don't send
-            if route.cost != INFINITY && route_entry.cost == INFINITY {
-                continue;
-            } else {
-                entries.push(route_entry);
-            }
-        }
-
-        Ok(entries)
-    }
-
-    pub fn size(&self) -> usize {
-        self.routes.len()
-    }
-
-    pub fn has_dst(&self, dst_addr: &Ipv4Addr) -> bool {
-        self.routes.contains_key(dst_addr)
-    }
-
-    pub fn get_route(&self, dst_addr: &Ipv4Addr) -> Result<Route> {
-        if !self.routes.contains_key(dst_addr) {
-            return Err(Error::new(ErrorKind::Other, "unreachable route"));
-        }
-        Ok(self.routes[dst_addr])
-    }
-
-    pub fn insert(&mut self, route: Route) -> Result<()> {
-        match self.has_dst(&route.dst_addr) || self.size() < MAX_ROUTES {
-            true => {
-                self.routes.insert(route.dst_addr, route);
-                Ok(())
-            }
-            false => Err(Error::new(ErrorKind::Other, "Too many routes.")),
-        }
-    }
-
-    pub fn delete(&mut self, dst_addr: &Ipv4Addr) {
-        self.routes.remove_entry(dst_addr);
-    }
-
-    pub fn iter(&self) -> Iter<'_, Ipv4Addr, Route> {
-        self.routes.iter()
-    }
-
-    pub fn iter_mut(&mut self) -> IterMut<'_, Ipv4Addr, Route> {
-        self.routes.iter_mut()
-    }
-}
-
-/**
- * Wrapper function to concurrently insert (update) route from routing table.
- */
-pub fn insert_route(routing_table: Arc<Mutex<RoutingTable>>, route: Route) -> Result<()> {
-    let mut rt = routing_table.lock().unwrap();
-    rt.insert(route)
-}
 
 /**
  * Struct representing a route entry in a RIP message.
@@ -182,14 +56,109 @@ impl Display for RouteEntry {
 }
 
 impl RouteEntry {
-    /*
-     * Dummy route for initial RIP request.
+    /**
+     * Converts a list of updated Routes into RouteEntries, subject to SH w/ PR. Accumulates routes
+     * that should be deleted.
+     *
+     * Inputs:
+     * - updated_routes: a list of updated Routes
+     * - to_delete: hash set in which to accumulate deleted routes
+     * - net_if: network interface for SH w/ PR
+     *
+     * Returns:
+     * - Processed list of route entries
      */
-    // pub const DUMMY_ROUTE: RouteEntry = RouteEntry {
-    // cost: INFINITY,
-    // address: 0,
-    // mask: INIT_MASK,
-    // };
+    pub fn process_updates(
+        updated_routes: &[Route],
+        to_delete: &mut HashSet<Ipv4Addr>,
+        net_if: &NetworkInterface,
+    ) -> Vec<RouteEntry> {
+        let mut entries = Vec::with_capacity(updated_routes.len());
+        for route in updated_routes {
+            // if metric is infinity, add to deletions
+            if route.cost == INFINITY {
+                to_delete.insert(route.dst_addr);
+            }
+            // otherwise, SH w/ PR it
+            let route_entry = RouteEntry::process_route(route, &net_if.dst_addr);
+            // if not INFINITY, but SH w/ PR makes it so, don't send
+            if route.cost == INFINITY || route_entry.cost != INFINITY {
+                entries.push(route_entry)
+            }
+        }
+        entries
+    }
+
+    /**
+     * Converts a list of Routes into a list of processed RouteEntries.
+     *
+     * Inputs:
+     * - routes: a list of routes to process
+     * - net_if: the network interface for the SH w/ PR
+     *
+     * Returns:
+     * - a list of route entries, post processing with the specified interface.
+     */
+    pub fn process_routes(routes: Vec<Route>, net_if: &NetworkInterface) -> Vec<RouteEntry> {
+        routes
+            .iter()
+            .map(|route| RouteEntry::process_route(route, &net_if.dst_addr))
+            .collect()
+    }
+
+    /**
+     * Converts a Route into a RouteEntry.
+     *
+     * Inputs:
+     * - remote_addr: the remote address of an interface. Compare with route.next_hop for SH w/ PR.
+     * - route: the route to process
+     *
+     * Returns:
+     * - A Result<RouteEntry> with the processed route entry, or an error
+     */
+    pub fn process_route(route: &Route, remote_addr: &Ipv4Addr) -> RouteEntry {
+        // here next hop is the REMOTE VIRTUAL IP ADDRESS of the interface
+        // if next hop is same as source, poison it
+        let cost = if route.next_hop == *remote_addr {
+            INFINITY
+        } else {
+            route.cost as u32
+        };
+
+        // turn entry into route
+        RouteEntry {
+            cost,
+            address: u32::from_be_bytes(route.dst_addr.octets()),
+            mask: route.mask,
+        }
+    }
+
+    /**
+     * Validate entry's correctness, according to the RFC.
+     */
+    fn validate_entry(&self) -> Result<()> {
+        let ip_addr = Ipv4Addr::from(self.address);
+        // check if unicast
+        if Ipv4Addr::is_unspecified(&ip_addr)
+            || Ipv4Addr::is_multicast(&ip_addr)
+            || Ipv4Addr::is_broadcast(&ip_addr)
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "must be unicast address!",
+            ));
+        }
+
+        // validate cost
+        if self.cost > 16 {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "cost must be between 0 and 16, inclusive",
+            ));
+        }
+
+        Ok(())
+    }
 
     /**
      * Converts RouteEntry into a vector of bytes.
@@ -297,7 +266,6 @@ impl RIPMessage {
         };
 
         for _ in 0..num_entries {
-            // TODO: some issue with parsing multiple entries; payload isn't increasing
             let cost = payload.read_u32::<NetworkEndian>()?;
             let address = payload.read_u32::<NetworkEndian>()?;
             let mask = payload.read_u32::<NetworkEndian>()?;
@@ -313,6 +281,43 @@ impl RIPMessage {
 }
 
 /**
+ * Sends routes to the specified destination interface.
+ *
+ * Inputs:
+ * - routes: the routes to send, pre-processed
+ * - dest_if: the destination interface
+ *
+ * Returns:
+ * - A Result<()> if successful, Err otherwise
+ */
+pub fn send_routes(routes: Vec<Route>, dest_if: &NetworkInterface) -> Result<()> {
+    let route_entries = RouteEntry::process_routes(routes, dest_if);
+    send_route_entries(route_entries, dest_if);
+    Ok(())
+}
+
+/**
+ * Sends route entries to the specified destination interface.
+ *
+ * Inputs:
+ * - route_entries: the route entries to send
+ * - dest_if: the destination interface
+ *
+ * Returns:
+ * - A Result<()> if successful, Err otherwise
+ */
+pub fn send_route_entries(route_entries: Vec<RouteEntry>, dst_if: &NetworkInterface) {
+    if !route_entries.is_empty() {
+        let msg = RIPMessage::new(RIP_RESPONSE, route_entries.len() as u16, route_entries);
+
+        // println!("Sending message: {}", msg);
+
+        // custom match since doesn't return
+        if let Ok(()) = send_rip_message(dst_if, msg) {}
+    }
+}
+
+/**
  * Sends a RIP message to the specified destination interface.
  *
  * Inputs:
@@ -324,10 +329,10 @@ impl RIPMessage {
  */
 pub fn send_rip_message(dest_if: &NetworkInterface, msg: RIPMessage) -> Result<()> {
     let payload = msg.to_bytes();
-    // println!("Rip message is {} bytes long", payload.len());
-    dest_if.send_ip(
+    dest_if.send_packet_raw(
         payload.as_slice(),
         RIP_PROTOCOL,
+        DEFAULT_TTL,
         dest_if.src_addr,
         dest_if.dst_addr,
     )
@@ -336,7 +341,7 @@ pub fn send_rip_message(dest_if: &NetworkInterface, msg: RIPMessage) -> Result<(
 /**
  * Parses a RIP Message from a packet.
  */
-pub fn recv_rip_message(packet: &IPPacket) -> Result<RIPMessage> {
+fn recv_rip_message(packet: &IPPacket) -> Result<RIPMessage> {
     // Validate appropriate protocol
     if packet.header.protocol != RIP_PROTOCOL {
         return Err(Error::new(
@@ -359,98 +364,172 @@ pub fn recv_rip_message(packet: &IPPacket) -> Result<RIPMessage> {
 }
 
 /**
- * Checks if address is destination of a local interface.
+ * Handles a RIP Request.
+ *
+ * Inputs:
+ * - rt: the current routing table
+ * - net_if: the source of the RIP Request
+ * - msg: the RIP request
+ * - trigger: the trigger channel
+ *
+ * Returns:
+ * - Nothing on success, an Error on failure
  */
-pub fn in_interfaces(addr: &Ipv4Addr, interfaces: &[NetworkInterface]) -> isize {
-    let mut in_ifs = -1;
+fn handle_rip_request(
+    rt: Arc<Mutex<RoutingTable>>,
+    net_if: &NetworkInterface,
+    msg: &RIPMessage,
+    trigger: Sender<Ipv4Addr>,
+) -> Result<()> {
+    if msg.num_entries > 0 {
+        Err(Error::new(
+            ErrorKind::Other,
+            "RIP requests with more than 1 entry are not currently supported.",
+        ))
+    } else {
+        // remote is dst of network interface, and gateway is src
+        let (remote_addr, gateway_addr) = (net_if.dst_addr, net_if.src_addr);
 
-    for (i, net_if) in interfaces.iter().enumerate() {
-        if net_if.dst_addr == *addr {
-            in_ifs = i as isize;
-            break;
+        let mut routing_table = rt.lock().unwrap();
+        // add incoming connection to routing table; has to be best path
+        routing_table.insert(Route {
+            dst_addr: remote_addr,
+            gateway: gateway_addr,
+            next_hop: remote_addr,
+            cost: 1,
+            mask: INIT_MASK,
+            timer: Instant::now(),
+        })?;
+        // notify trigger of update
+        match trigger.send(remote_addr) {
+            Ok(()) => (),
+            Err(e) => return Err(Error::new(ErrorKind::Other, e.to_string())),
         }
-    }
 
-    in_ifs
+        // process routes into route entries
+        let entries = RouteEntry::process_routes(routing_table.get_routes(), net_if);
+
+        // make new RIP message
+        let msg = RIPMessage {
+            command: RIP_RESPONSE,
+            num_entries: entries.len() as u16,
+            entries,
+        };
+
+        // send message response!
+        send_rip_message(net_if, msg)
+    }
 }
 
-pub fn validate_entry(entry: &RouteEntry) -> Result<()> {
-    let ip_addr = Ipv4Addr::from(entry.address);
-    // check if unicast
-    if Ipv4Addr::is_unspecified(&ip_addr)
-        || Ipv4Addr::is_multicast(&ip_addr)
-        || Ipv4Addr::is_broadcast(&ip_addr)
-    {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "must be unicast address!",
-        ));
-    }
+/**
+ * Handles a RIP Response.
+ *
+ * Inputs:
+ * - rt: the current routing table
+ * - net_if: the source of the RIP response
+ * - msg: the RIP response
+ * - trigger: the trigger channel
+ *
+ * Returns:
+ * - Nothing on success, an Error on failure
+ */
+fn handle_rip_response(
+    rt: Arc<Mutex<RoutingTable>>,
+    net_if: &NetworkInterface,
+    msg: &RIPMessage,
+    trigger: Sender<Ipv4Addr>,
+) -> Result<()> {
+    // remote is dst of network interface, and gateway is src
+    let (remote_addr, gateway_addr) = (net_if.dst_addr, net_if.src_addr);
 
-    // validate cost
-    // if entry.cost < 1 || entry.cost > 16 { // TODO: how to do this? RFC says if not [1, 16]
-    if entry.cost > 16 {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "cost must be between 1 and 16, inclusive",
-        ));
-    }
+    let mut routing_table = rt.lock().unwrap();
+    // process each entry
+    for entry in &msg.entries {
+        // first, validate entry
+        match entry.validate_entry() {
+            Ok(_) => (), //println!("Current entry: {:?}", entry),
+            Err(e) => {
+                println!("{}", e);
+                continue;
+            }
+        }
 
+        // final destination address of this entry
+        let dst_addr = Ipv4Addr::from(entry.address);
+        // if valid, update metric
+        let new_metric = min(entry.cost + 1, INFINITY);
+
+        if let Some(mut route) = routing_table.get_route(&dst_addr) {
+            // if came from original source, restart timer
+            if route.next_hop == remote_addr {
+                route.timer = Instant::now();
+                routing_table.insert(route)?;
+            }
+            // if:
+            // - metrics diff and E's src addr == next hop addr
+            // - new metric < curr metric
+            // - new metric == curr metric and time elapsed >= 6s
+            if (new_metric != route.cost && route.next_hop == remote_addr)
+                || (new_metric < route.cost)
+                || (new_metric == route.cost
+                    && route.timer.elapsed() >= Duration::from_secs(ROUTE_TIMEOUT / 2))
+            {
+                // set metric, and update gateway address and next hop
+                route.cost = new_metric;
+                route.gateway = gateway_addr;
+                route.next_hop = remote_addr;
+
+                // re-initialize the timer; besides timer, don't need additional handling
+                // for infinity issues
+                if new_metric != INFINITY {
+                    route.timer = Instant::now();
+                    // println!("Timer reinitialized for route {:?}", route);
+                }
+                // update routing table
+                routing_table.insert(route)?;
+
+                // signal to trigger that something changed (either delete, or update)
+                match trigger.send(dst_addr) {
+                    Ok(_) => (),
+                    Err(e) => eprintln!("{}", e),
+                }
+            }
+        } else {
+            // if not infinity, add to routing table
+            if new_metric < INFINITY {
+                routing_table.insert(Route {
+                    dst_addr,
+                    gateway: gateway_addr,
+                    next_hop: remote_addr,
+                    cost: new_metric,
+                    mask: INIT_MASK,
+                    timer: Instant::now(),
+                })?;
+            }
+            // notify trigger that a change has happened on dst_addr
+            match trigger.send(dst_addr) {
+                Ok(_) => (),
+                Err(e) => eprintln!("{}", e),
+            }
+        };
+    }
     Ok(())
 }
 
-/*
- * Find remote IP address of a gateway IP address.
- */
-// fn get_end_addr(interfaces: &[NetworkInterface], gateway_addr: &Ipv4Addr) -> Option<Ipv4Addr> {
-// let mut end_addr = None;
-
-// for net_if in interfaces {
-// if net_if.src_addr == *gateway_addr {
-// end_addr = Some(net_if.dst_addr);
-// break;
-// }
-// }
-
-// end_addr
-// }
-
 /**
- * Converts a route in the RoutingTable into a RouteEntry for RIPMessages.
+ * Makes a RIP Handler, given a reference to the RoutingTable and Interfaces.
  *
  * Inputs:
- * - src_addr: the source of the route. Compare with route.next_hop for SH w/ PR.
- * - dst_addr: the final destination of the route.
- * - route: the route to process
+ * - interfaces: the available network interfaces
+ * - rt: the routing table
+ * - trigger: a trigger channel
  *
  * Returns:
- * - A Return<RouteEntry> with the processed route entry, or an error
+ * - A RIP Handler
  */
-pub fn process_route(
-    src_addr: &Ipv4Addr,
-    dst_addr: &Ipv4Addr,
-    route: &Route,
-) -> Result<RouteEntry> {
-    // here next hop is the REMOTE VIRTUAL IP ADDRESS of the interface
-    // if next hop is same as source, poison it
-    let cost = if route.next_hop == *src_addr {
-        // println!("get poisoned (next_hop = src = {})", src_addr);
-        INFINITY
-    } else {
-        route.cost as u32
-    };
-
-    // turn entry into route
-    Ok(RouteEntry {
-        cost,
-        address: u32::from_be_bytes(dst_addr.octets()),
-        mask: route.mask,
-    })
-}
-
 pub fn make_rip_handler(
-    interfaces: Arc<Mutex<Vec<NetworkInterface>>>,
-    routing_table: Arc<Mutex<RoutingTable>>,
+    interfaces: Arc<Mutex<NetworkInterfaces>>,
+    rt: Arc<Mutex<RoutingTable>>,
     trigger: Sender<Ipv4Addr>,
 ) -> Handler {
     Arc::new(Mutex::new(move |packet: IPPacket| -> Result<()> {
@@ -460,145 +539,28 @@ pub fn make_rip_handler(
         let remote_addr = Ipv4Addr::from(packet.header.source);
         let gateway_addr = Ipv4Addr::from(packet.header.destination);
 
-        // println!("Remote: {}\tGateway: {}\n", remote_addr, gateway_addr);
-
         // check that source addr is one of the destination interfaces
-        let src_if_index = in_interfaces(&remote_addr, &*interfaces);
-        if src_if_index < 0 {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "Source address not from directly connected neighbor!",
-            ));
-        }
-        let src_if_index = src_if_index as usize;
+        let src_if = match interfaces.get_neighbor_if(&remote_addr) {
+            Some(net_if) => net_if,
+            None => {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "Source address not from directly connected neighbor!",
+                ))
+            }
+        };
+
+        assert!(gateway_addr == src_if.src_addr);
+        assert!(remote_addr == src_if.dst_addr);
 
         // first, attempt to parse into rip message; validates that protocol is right
         let msg = recv_rip_message(&packet)?;
 
-        // println!("{}", msg);
-
-        // lock routing table; may need to process
-        let mut routing_table = routing_table.lock().unwrap();
-
         // Handle Request
-        if msg.command == RIP_REQUEST {
-            match msg.num_entries {
-                // if no entries, send response
-                0 => {
-                    // TODO: is this allowed? or necessary? or recommended?
-                    // add incoming connection to routing table; has to be best path
-                    routing_table.insert(Route {
-                        dst_addr: remote_addr,
-                        gateway: gateway_addr,
-                        next_hop: remote_addr,
-                        cost: 1,
-                        changed: true,
-                        mask: INIT_MASK,
-                        timer: Instant::now(),
-                    })?;
-                    // notify trigger of update
-                    match trigger.send(remote_addr) {
-                        Ok(()) => (),
-                        Err(e) => return Err(Error::new(ErrorKind::Other, e.to_string())),
-                    }
-
-                    // get processed list of entries in routing table
-                    let entries = routing_table.get_entries(&interfaces[src_if_index])?;
-
-                    // make new RIP message
-                    let msg = RIPMessage {
-                        command: RIP_RESPONSE,
-                        num_entries: entries.len() as u16,
-                        entries,
-                    };
-
-                    // send message response!
-                    return send_rip_message(&interfaces[src_if_index], msg);
-                }
-                // if more than 0 entries, do nothing
-                _ => {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        "RIP requests with more than 1 entry are not currently supported.",
-                    ))
-                }
-            }
-        } else if msg.command == RIP_RESPONSE {
-            // process each entry
-            for entry in msg.entries {
-                // first, validate each entry
-                match validate_entry(&entry) {
-                    Ok(_) => (), //println!("Current entry: {:?}", entry),
-                    Err(e) => {
-                        println!("{}", e);
-                        continue;
-                    }
-                }
-
-                // final destination address of this entry
-                let dst_addr = Ipv4Addr::from(entry.address);
-                // if valid, update metric
-                let new_metric = min(entry.cost + 1, INFINITY);
-
-                // if no explicit route:
-                if !routing_table.has_dst(&dst_addr) {
-                    // if not infinity, add to routing table
-                    if new_metric < INFINITY {
-                        routing_table.insert(Route {
-                            dst_addr,
-                            gateway: gateway_addr,
-                            next_hop: remote_addr,
-                            cost: new_metric,
-                            changed: true,
-                            mask: INIT_MASK,
-                            timer: Instant::now(),
-                        })?;
-                    }
-                    // notify trigger that a change has happened on dst_addr
-                    match trigger.send(dst_addr) {
-                        Ok(()) => (),
-                        Err(e) => return Err(Error::new(ErrorKind::Other, e.to_string())),
-                    }
-                } else {
-                    // get copy of route; will change
-                    let mut route = match routing_table.get_route(&dst_addr) {
-                        Ok(route) => route,
-                        Err(_) => return Ok(()),
-                    };
-                    if route.next_hop == remote_addr {
-                        route.timer = Instant::now();
-                        routing_table.insert(route)?;
-                    }
-                    // if (metrics diff and E's src addr == next hop addr) OR (new
-                    // metric < curr metric)
-                    if (new_metric != route.cost && route.next_hop == remote_addr)
-                        || (new_metric < route.cost)
-                    {
-                        // set metric, and update next hop
-                        route.cost = new_metric;
-                        route.next_hop = remote_addr;
-                        // mark as changed
-                        route.changed = true;
-
-                        // re-initialize the timer; besides timer, don't need additional handling
-                        // for infinity issues
-                        if new_metric != INFINITY {
-                            route.timer = Instant::now();
-                            // println!("Timer reinitialized for route {:?}", route);
-                        }
-                        // update routing table
-                        routing_table.insert(route)?;
-
-                        // signal to trigger that something changed (either delete, or update)
-                        match trigger.send(dst_addr) {
-                            Ok(()) => (),
-                            Err(e) => return Err(Error::new(ErrorKind::Other, e.to_string())),
-                        }
-                    }
-                }
-            }
+        match msg.command {
+            RIP_REQUEST => handle_rip_request(Arc::clone(&rt), src_if, &msg, trigger.clone()),
+            RIP_RESPONSE => handle_rip_response(Arc::clone(&rt), src_if, &msg, trigger.clone()),
+            _ => Ok(()),
         }
-
-        Ok(())
     }))
 }

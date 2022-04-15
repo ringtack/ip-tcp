@@ -14,7 +14,6 @@ release:
 	CARGO_HOME=$(CARGO_HOME) $(CARGO) build --release
 	cp $(RELEASEDIR)/$(TARGET) ./node
 
-
 clean:
 	$(CARGO) clean
 	rm -f ./node*
