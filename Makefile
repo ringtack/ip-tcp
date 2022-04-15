@@ -1,13 +1,19 @@
 CARGO=cargo
-TARGETDIR=./target/debug
+DEBUGDIR=$(CURDIR)/target/debug
+RELEASEDIR=$(CURDIR)/target/release
+CARGO_HOME=$(CURDIR)/.cargo
 TARGET=ip
 
-all: build
+all: debug release
 
-build:
-	CARGO_HOME=.cargo $(CARGO) build
-	cp $(TARGETDIR)/$(TARGET) ./node
+debug:
+	CARGO_HOME=$(CARGO_HOME) $(CARGO) build
+	cp $(DEBUGDIR)/$(TARGET) ./node-dbg
+
+release:
+	CARGO_HOME=$(CARGO_HOME) $(CARGO) build --release
+	cp $(RELEASEDIR)/$(TARGET) ./node
 
 clean:
 	$(CARGO) clean
-	rm -f ./node
+	rm -f ./node*

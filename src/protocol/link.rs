@@ -97,10 +97,11 @@ impl LinkInterface {
      * error
      */
     pub fn recv_link_frame(&self, payload: &mut [u8; MTU]) -> Result<(usize, SocketAddrV4), Error> {
-        // if locally not active, return an error
-        if !self.active.load(Ordering::Relaxed) {
-            return Err(Error::new(ErrorKind::NotConnected, "Link is down."));
-        }
+        // if locally not active, return an error NOTE: don't think this is possible with UDP
+        // abstraction
+        // if !self.active.load(Ordering::Relaxed) {
+        // return Err(Error::new(ErrorKind::NotConnected, "Link is down."));
+        // }
         // store payload
         let (num_bytes, src_addr) = self.src_link.recv_from(payload)?;
         // if read more than MTU, return error

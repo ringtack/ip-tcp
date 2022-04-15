@@ -1,11 +1,17 @@
 *~
 \#*#
 
-target
 
+# Ignore Rust caches/locks
+.cargo
+Cargo.lock
+
+# Ignore build outputs
+target
+# and intermediate ones
 *.o
 
+# Ignore system files
 .vagrant/
-
 .DS_Store
 
