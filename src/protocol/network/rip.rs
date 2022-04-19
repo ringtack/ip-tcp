@@ -376,7 +376,7 @@ fn recv_rip_message(packet: &IPPacket) -> Result<RIPMessage> {
  * - Nothing on success, an Error on failure
  */
 fn handle_rip_request(
-    rt: Arc<Mutex<RoutingTable>>,
+    rt: Arc<RoutingTable>,
     net_if: &NetworkInterface,
     msg: &RIPMessage,
     trigger: Sender<Ipv4Addr>,
@@ -390,9 +390,9 @@ fn handle_rip_request(
         // remote is dst of network interface, and gateway is src
         let (remote_addr, gateway_addr) = (net_if.dst_addr, net_if.src_addr);
 
-        let mut routing_table = rt.lock().unwrap();
+        // let mut routing_table = rt.lock().unwrap();
         // add incoming connection to routing table; has to be best path
-        routing_table.insert(Route {
+        rt.insert(Route {
             dst_addr: remote_addr,
             gateway: gateway_addr,
             next_hop: remote_addr,
@@ -407,7 +407,7 @@ fn handle_rip_request(
         }
 
         // process routes into route entries
-        let entries = RouteEntry::process_routes(routing_table.get_routes(), net_if);
+        let entries = RouteEntry::process_routes(rt.get_routes(), net_if);
 
         // make new RIP message
         let msg = RIPMessage {
@@ -434,7 +434,7 @@ fn handle_rip_request(
  * - Nothing on success, an Error on failure
  */
 fn handle_rip_response(
-    rt: Arc<Mutex<RoutingTable>>,
+    rt: Arc<RoutingTable>,
     net_if: &NetworkInterface,
     msg: &RIPMessage,
     trigger: Sender<Ipv4Addr>,
@@ -442,7 +442,7 @@ fn handle_rip_response(
     // remote is dst of network interface, and gateway is src
     let (remote_addr, gateway_addr) = (net_if.dst_addr, net_if.src_addr);
 
-    let mut routing_table = rt.lock().unwrap();
+    // let mut routing_table = rt.lock().unwrap();
     // process each entry
     for entry in &msg.entries {
         // first, validate entry
@@ -459,11 +459,11 @@ fn handle_rip_response(
         // if valid, update metric
         let new_metric = min(entry.cost + 1, INFINITY);
 
-        if let Some(mut route) = routing_table.get_route(&dst_addr) {
+        if let Some(mut route) = rt.get_route(&dst_addr) {
             // if came from original source, restart timer
             if route.next_hop == remote_addr {
                 route.timer = Instant::now();
-                routing_table.insert(route)?;
+                rt.insert(route)?;
             }
             // if:
             // - metrics diff and E's src addr == next hop addr
@@ -486,7 +486,7 @@ fn handle_rip_response(
                     // println!("Timer reinitialized for route {:?}", route);
                 }
                 // update routing table
-                routing_table.insert(route)?;
+                rt.insert(route)?;
 
                 // signal to trigger that something changed (either delete, or update)
                 match trigger.send(dst_addr) {
@@ -497,7 +497,7 @@ fn handle_rip_response(
         } else {
             // if not infinity, add to routing table
             if new_metric < INFINITY {
-                routing_table.insert(Route {
+                rt.insert(Route {
                     dst_addr,
                     gateway: gateway_addr,
                     next_hop: remote_addr,
@@ -528,12 +528,12 @@ fn handle_rip_response(
  * - A RIP Handler
  */
 pub fn make_rip_handler(
-    interfaces: Arc<Mutex<NetworkInterfaces>>,
-    rt: Arc<Mutex<RoutingTable>>,
+    interfaces: Arc<NetworkInterfaces>,
+    rt: Arc<RoutingTable>,
     trigger: Sender<Ipv4Addr>,
 ) -> Handler {
     Arc::new(Mutex::new(move |packet: IPPacket| -> Result<()> {
-        let interfaces = interfaces.lock().unwrap();
+        // let interfaces = interfaces.read().unwrap();
 
         // get source (opposite IP) and gateway IP address (this is the destination of the packet!)
         let remote_addr = Ipv4Addr::from(packet.header.source);

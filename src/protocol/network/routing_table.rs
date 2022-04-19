@@ -1,14 +1,15 @@
+use dashmap::{
+    iter::{Iter, IterMut},
+    DashMap,
+};
+
 use std::{
-    collections::{
-        hash_map::{Iter, IterMut},
-        HashMap,
-    },
     io::{Error, ErrorKind, Result},
     net::Ipv4Addr,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::Sender,
-        Arc, Mutex,
+        Arc,
     },
     thread,
     time::{Duration, Instant},
@@ -24,13 +25,13 @@ pub const ROUTE_TIMEOUT: u64 = 12;
  * Routing Table. Maps destination addresses to routes.
  */
 pub struct RoutingTable {
-    routes: HashMap<Ipv4Addr, Route>,
+    routes: DashMap<Ipv4Addr, Route>,
 }
 
 impl RoutingTable {
     pub fn new() -> RoutingTable {
         RoutingTable {
-            routes: HashMap::new(),
+            routes: DashMap::new(),
         }
     }
 
@@ -48,10 +49,7 @@ impl RoutingTable {
      * - Some(Route) if exists, None otheriwse
      */
     pub fn get_route(&self, dst_addr: &Ipv4Addr) -> Option<Route> {
-        match self.routes.contains_key(dst_addr) {
-            true => Some(self.routes[dst_addr]),
-            false => None,
-        }
+        self.routes.get(dst_addr).map(|route| *route)
     }
 
     /**
@@ -61,7 +59,7 @@ impl RoutingTable {
      * - A Vec<Route> consisting of all current routes.
      */
     pub fn get_routes(&self) -> Vec<Route> {
-        self.routes.values().cloned().collect()
+        self.routes.iter().map(|e| *e.value()).collect()
     }
 
     /**
@@ -73,7 +71,7 @@ impl RoutingTable {
      * Returns:
      * - Ok() if success, Err() otherwise
      */
-    pub fn insert(&mut self, route: Route) -> Result<()> {
+    pub fn insert(&self, route: Route) -> Result<()> {
         match self.routes.contains_key(&route.dst_addr) || self.size() < MAX_ROUTES {
             true => {
                 self.routes.insert(route.dst_addr, route);
@@ -86,15 +84,15 @@ impl RoutingTable {
     /**
      * Deletes route from the routing table.
      */
-    pub fn delete(&mut self, dst_addr: &Ipv4Addr) {
-        self.routes.remove_entry(dst_addr);
+    pub fn delete(&self, dst_addr: &Ipv4Addr) {
+        self.routes.remove(dst_addr);
     }
 
     pub fn iter(&self) -> Iter<'_, Ipv4Addr, Route> {
         self.routes.iter()
     }
 
-    pub fn iter_mut(&mut self) -> IterMut<'_, Ipv4Addr, Route> {
+    pub fn iter_mut(&self) -> IterMut<'_, Ipv4Addr, Route> {
         self.routes.iter_mut()
     }
 
@@ -105,7 +103,7 @@ impl RoutingTable {
         let mut res = String::new();
         res.push_str("cost\tdst\t\tloc\n");
 
-        for (index, (_, route)) in self.iter().enumerate() {
+        for (index, route) in self.iter().enumerate() {
             // only display if cost is not infinity
             if route.cost != INFINITY {
                 res.push_str(&(format!("{}\t{}\t{}", route.cost, route.dst_addr, route.gateway)));
@@ -129,7 +127,7 @@ impl RoutingTable {
      * - thread::JoinHandle<()> for cleanup later
      */
     pub fn make_rt_cleanup(
-        rt: Arc<Mutex<RoutingTable>>,
+        rt: Arc<RoutingTable>,
         trigger: Sender<Ipv4Addr>,
         stopped: Arc<AtomicBool>,
     ) -> thread::JoinHandle<()> {
@@ -142,9 +140,12 @@ impl RoutingTable {
             thread::sleep(Duration::from_millis(CHECK_TIMEOUTS));
 
             let timeout = Duration::from_secs(ROUTE_TIMEOUT);
-            let mut rt = rt.lock().unwrap();
+            // let mut rt = rt.lock().unwrap();
             // for each route:
-            for (dst_addr, route) in rt.iter_mut() {
+            for mut route_entry in rt.iter_mut() {
+                let dst_addr = *route_entry.key();
+                let route = route_entry.value_mut();
+                // let mut route = route_entry.value().clone();
                 // if:
                 // - not a local entry (i.e. cost > 0) and time since now and last updated > TIMEOUT
                 // - cost is INFINITY
@@ -158,7 +159,10 @@ impl RoutingTable {
 
                     // before notifying, need to set metric to INFINITY
                     route.cost = INFINITY;
-                    trigger.send(*dst_addr).unwrap();
+                    match trigger.send(dst_addr) {
+                        Ok(_) => (),
+                        Err(e) => eprintln!("{}", e),
+                    }
                 }
             }
         })

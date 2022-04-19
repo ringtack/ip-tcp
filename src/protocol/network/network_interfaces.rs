@@ -39,8 +39,8 @@ impl NetworkInterfaces {
     /**
      * Get an unspecified network interface from the list.
      */
-    pub fn get_net_if(&self) -> &NetworkInterface {
-        &self.interfaces[0]
+    pub fn get_net_if(&self) -> NetworkInterface {
+        self.interfaces[0].clone()
     }
 
     /**
@@ -123,7 +123,7 @@ impl NetworkInterfaces {
      * Returns:
      * - a mutable NetworkInterface with the specified id, or an Error
      */
-    pub fn find_interface_id(&mut self, id: isize) -> Result<&mut NetworkInterface> {
+    pub fn find_interface_id(&self, id: isize) -> Result<NetworkInterface> {
         // check if is valid interface
         if id < 0 || id as usize >= self.interfaces.len() {
             return Err(Error::new(
@@ -137,9 +137,9 @@ impl NetworkInterfaces {
         }
 
         // find interface we're bringing down
-        for interface in &mut self.interfaces {
+        for interface in &self.interfaces {
             if interface.id == id as u8 {
-                return Ok(interface);
+                return Ok(interface.clone());
             }
         }
 

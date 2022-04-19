@@ -1,19 +1,20 @@
 use crate::protocol::link::READ_TIMEOUT;
 use crate::protocol::network::{
-    ip_packet::*, network_interfaces::*, rip::*, routing_table::*, test::*, NetworkLayer,
+    ip_packet::*, network_interfaces::*, rip::*, routing_table::*, test::*, InternetModule,
 };
+use crate::protocol::tcp::{tcp_socket::*, *};
 
 use std::{
+    collections::HashMap,
     fs::File,
     io::{BufRead, BufReader, Error, ErrorKind, Lines, Result},
-    mem,
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     path::Path,
     process,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{channel, Sender},
-        Arc, Mutex,
+        Arc,
     },
     thread,
     time::{Duration, Instant},
@@ -23,7 +24,8 @@ use std::{
  * Struct representing the network layer interface.
  */
 pub struct Node {
-    net_layer: NetworkLayer,
+    ip_module: InternetModule,
+    tcp_layer: TCPLayer,
     trigger: Sender<Ipv4Addr>,
     threads: Vec<thread::JoinHandle<()>>,
     stopped: Arc<AtomicBool>,
@@ -36,7 +38,7 @@ impl Node {
 
         // if successful, create initial interface and routing table
         let mut ifs = NetworkInterfaces::new();
-        let mut rt = RoutingTable::new();
+        let rt = RoutingTable::new();
         // store src socket; shared across all interfaces
         let mut src_sock = None;
 
@@ -85,32 +87,33 @@ impl Node {
             })?;
         }
         // Create initial structs for Node construction
-        let ifs = Arc::new(Mutex::new(ifs));
-        let rt = Arc::new(Mutex::new(rt));
+        let ifs = Arc::new(ifs);
+        let rt = Arc::new(rt);
         let stopped = Arc::new(AtomicBool::new(false));
         // create sender and receiver for trigger updates
         let (tx, rx) = channel::<Ipv4Addr>();
-
-        // create Node!
-        let mut node = Node {
-            net_layer: NetworkLayer::new(rt.clone(), ifs.clone()),
-            trigger: tx.clone(),
-            threads: Vec::new(),
-            stopped: stopped.clone(),
-        };
 
         /* ====================================================================
          * Protocol Handlers Setup
          * ====================================================================
          */
-        // configure test handler
-        node.net_layer
-            .register_handler(TEST_PROTOCOL, make_test_handler(ifs.clone()));
-        // configure RIP handler
-        node.net_layer.register_handler(
+        let mut handlers = HashMap::new();
+        handlers.insert(TEST_PROTOCOL, make_test_handler(ifs.clone()));
+        handlers.insert(
             RIP_PROTOCOL,
             make_rip_handler(ifs.clone(), rt.clone(), tx.clone()),
         );
+        let handlers = Arc::new(handlers);
+
+        let ip_module = InternetModule::new(rt.clone(), ifs.clone(), handlers);
+        // create Node!
+        let mut node = Node {
+            ip_module: ip_module.clone(),
+            tcp_layer: TCPLayer::new(ip_module),
+            trigger: tx.clone(),
+            threads: Vec::new(),
+            stopped: stopped.clone(),
+        };
 
         /* ====================================================================
          * Thread Handlers Setup
@@ -122,25 +125,25 @@ impl Node {
 
         // set up trigger response thread
         node.threads
-            .push(node.net_layer.make_trigger_response(rx, stopped.clone()));
+            .push(node.ip_module.make_trigger_response(rx, stopped.clone()));
 
         // set up periodic RIP update thread
         node.threads
-            .push(node.net_layer.make_periodic_updates(stopped.clone()));
+            .push(node.ip_module.make_periodic_updates(stopped.clone()));
 
-        let ifs = ifs.lock().unwrap();
+        // let ifs = ifs.read().unwrap();
         // send initial RIP Request to network interfaces (i.e. neighbors)
         for dest_if in ifs.iter() {
             send_rip_message(dest_if, RIPMessage::new(RIP_REQUEST, 0, vec![]))?;
         }
-        mem::drop(ifs);
+        // mem::drop(ifs);
 
         // Set up packet listener thread
         node.threads
-            .push(node.net_layer.clone().make_ip_listener(stopped));
+            .push(node.ip_module.clone().make_ip_listener(stopped));
 
         // print out startup interfaces
-        println!("{}", node.net_layer.fmt_startup_interfaces());
+        println!("{}", node.ip_module.fmt_startup_interfaces());
 
         Ok(node)
     }
@@ -158,7 +161,7 @@ impl Node {
         }
 
         // Send RIP message indicating death to local interfaces
-        self.net_layer.send_exit_msg();
+        self.ip_module.send_exit_msg();
         // ... aaaand we're done! :D
     }
 
@@ -168,14 +171,14 @@ impl Node {
     pub fn handle_command(&mut self, args: &[&str]) {
         match args[0] {
             "help" | "h" => println!("{}", HELP_MSG),
-            "interfaces" | "li" => println!("{}", self.net_layer.fmt_interfaces()),
-            "routes" | "lr" => println!("{}", self.net_layer.fmt_routes()),
+            "interfaces" | "li" => println!("{}", self.ip_module.fmt_interfaces()),
+            "routes" | "lr" => println!("{}", self.ip_module.fmt_routes()),
             "down" => {
                 if args.len() != 2 {
                     eprintln!("Usage: \"down <id>\"");
                 } else {
                     match args[1].parse::<isize>() {
-                        Ok(id) => match self.net_layer.interface_link_down(id) {
+                        Ok(id) => match self.ip_module.interface_link_down(id) {
                             Ok(_) => println!("interface {} is now disabled", id),
                             Err(e) => eprintln!("{}", e),
                         },
@@ -189,7 +192,7 @@ impl Node {
                 } else {
                     match args[1].parse::<isize>() {
                         Ok(id) => {
-                            match self.net_layer.interface_link_up(id, self.trigger.clone()) {
+                            match self.ip_module.interface_link_up(id, self.trigger.clone()) {
                                 Ok(_) => println!("interface {} is now enabled", id),
                                 Err(e) => eprintln!("{}", e),
                             }
@@ -232,11 +235,11 @@ impl Node {
         let dst_addr = str_2_ipv4(&ip)?;
 
         // find local interface
-        let routing_table = self.net_layer.routing_table.lock().unwrap();
+        // let routing_table = self.ip_module.routing_table.lock().unwrap();
         // check if one of the destinations
-        if let Some(route) = routing_table.get_route(&dst_addr) {
-            mem::drop(routing_table);
-            self.net_layer.handle_ip(IPPacket::new(
+        if let Some(route) = self.ip_module.routing_table.get_route(&dst_addr) {
+            // mem::drop(routing_table);
+            self.ip_module.handle_ip(IPPacket::new(
                 route.gateway,
                 dst_addr,
                 payload.as_bytes().into(),
