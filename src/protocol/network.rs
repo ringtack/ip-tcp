@@ -362,9 +362,9 @@ impl InternetModule {
                         thread::sleep(Duration::from_millis(200));
                         // eprintln!("link not up");
                     }
-                    // if didn't receive anything, wait for a bit
+                    // if didn't receive anything, re-run
                     ErrorKind::WouldBlock | ErrorKind::TimedOut => {
-                        thread::sleep(Duration::from_millis(200));
+                        // thread::sleep(Duration::from_millis(200));
                     }
                     // otherwise, probably something wrong with packet, so emit error
                     _ => eprintln!("{}", e),

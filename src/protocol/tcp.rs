@@ -11,10 +11,12 @@ use std::{
     },
 };
 
-use self::tcp_socket::*;
 use crate::protocol::network::{ip_packet::*, *};
 
+use self::tcp_socket::*;
+
 pub const TCP_PROTOCOL: u8 = 6;
+pub const ZERO_SOCK: SocketAddrV4 = SocketAddrV4::new([0, 0, 0, 0].into(), 0);
 
 type SocketID = u8;
 
@@ -52,7 +54,7 @@ impl TCPLayer {
         let src_sock = SocketAddrV4::new(addr, port);
         let socket_entry = SocketEntry {
             src_sock,
-            dst_sock: SocketAddrV4::new(Ipv4Addr::from(0), 0),
+            dst_sock: ZERO_SOCK,
         };
 
         if self.sockets.contains_key(&socket_entry) {
@@ -63,8 +65,10 @@ impl TCPLayer {
         self.next_id += 1;
 
         self.socket_ids.insert(id, socket_entry.clone());
-        self.sockets
-            .insert(socket_entry, Socket::new(TCPState::Listen));
+        self.sockets.insert(
+            socket_entry,
+            Socket::new(src_sock, ZERO_SOCK, TCPState::Listen),
+        );
 
         let (tx, rx) = mpsc::channel::<SocketAddrV4>();
         self.accepting.insert(src_sock, tx);
@@ -86,8 +90,10 @@ impl TCPLayer {
 
                 // create new socket [NOTE: don't need to update port here!]
                 let sock_entry = SocketEntry { src_sock, dst_sock };
-                self.sockets
-                    .insert(sock_entry, Socket::new(TCPState::SynRcvd));
+                self.sockets.insert(
+                    sock_entry,
+                    Socket::new(src_sock, dst_sock, TCPState::SynRcvd),
+                );
 
                 // send SYN+ACK packet
                 let (src_addr, src_port) = (src_sock.ip(), src_sock.port());
@@ -111,7 +117,7 @@ impl TCPLayer {
                 let sock_entry = SocketEntry { src_sock, dst_sock };
 
                 // TODO: update src_port here!!!!
-                self.sockets.get_mut(&sock_entry).unwrap().tcp_state = TCPState::Established;
+                // self.sockets.get_mut(&sock_entry).unwrap().tcp_state = TCPState::Established;
 
                 // probably just return ID?
                 return Ok(u8::MAX);
