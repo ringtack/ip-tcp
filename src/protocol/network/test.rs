@@ -39,7 +39,6 @@ pub fn make_test_handler(interfaces: Arc<NetworkInterfaces>) -> Handler {
     Arc::new(Mutex::new(move |packet: IPPacket| -> Result<()> {
         let (header, msg) = recv_test_message(&packet)?;
 
-        // let ifs = interfaces.read().unwrap();
         let dst_addr = Ipv4Addr::from(header.destination);
 
         if let Some(net_if) = interfaces.get_local_if(&dst_addr) {

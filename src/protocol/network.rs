@@ -66,10 +66,8 @@ impl InternetModule {
      */
     pub fn send_ip(&self, packet: IPPacket) -> Result<()> {
         let dst_addr = Ipv4Addr::from(packet.header.destination);
-        // let rt = self.routing_table.lock().unwrap();
         // check if routing table has destination; throw error if not
         if let Some(route) = self.routing_table.get_route(&dst_addr) {
-            // let ifs = self.interfaces.read().unwrap();
             // attempt to send through gateway interface
             if let Some(net_if) = self.interfaces.get_local_if(&route.gateway) {
                 return net_if.send_packet(packet);
@@ -98,15 +96,12 @@ impl InternetModule {
 
         let dst_addr = Ipv4Addr::from(packet.header.destination);
 
-        // let ifs = self.interfaces.read().unwrap();
         let is_local = self.interfaces.is_local_if(&dst_addr);
         // if receiving interface was local, pass to handler
         if is_local {
             let protocol = packet.header.protocol;
             if self.handlers.contains_key(&protocol) {
-                // let handler = self.handlers.get_mut(&protocol).unwrap();
                 let mut handler = self.handlers[&protocol].lock().unwrap();
-                // let mut handler = handler.lock().unwrap();
                 if handler(packet).is_ok() {}
             }
         } else {
@@ -138,7 +133,6 @@ impl InternetModule {
      */
     pub fn send_exit_msg(&self) {
         // for each local interface, make RouteEntrys to each
-        // let interfaces = self.interfaces.read().unwrap();
 
         // collect dead routes
         let dead_routes: Vec<RouteEntry> = self
@@ -159,24 +153,11 @@ impl InternetModule {
     }
 
     /**
-     * Register handler for a specific protocol.
-     *
-     * Inputs:
-     * - protocol: the protocol for which a handler should be registered
-     * - handler: the handler for the specific protocol.
-     */
-    // pub fn register_handler(&self, protocol: u8, handler: Handler) {
-    // self.handlers.insert(protocol, handler);
-    // }
-
-    /**
      * Bring the link of an interface "down"
      */
     pub fn interface_link_down(&mut self, id: isize) -> Result<()> {
         // find interface we're bringing down
         let mut down_if = self.interfaces.find_interface_id(id)?;
-        // let interfaces = self.interfaces.read().unwrap();
-        // interfaces.find_interface_id(id)?
 
         // throw error if already down
         if !down_if.is_active() {
@@ -206,8 +187,6 @@ impl InternetModule {
     pub fn interface_link_up(&mut self, id: isize, trigger: Sender<Ipv4Addr>) -> Result<()> {
         // find interface we're bringing up
         let mut up_if = self.interfaces.find_interface_id(id)?;
-        // let interfaces = self.interfaces.read().unwrap();
-        // interfaces.find_interface_id(id)?
 
         // throw error if already up
         if up_if.is_active() {
@@ -219,7 +198,6 @@ impl InternetModule {
         up_if.link_if.link_up();
 
         // add to routing table this local route; will send out in next periodic update
-        // let mut routing_table = self.routing_table.lock().unwrap();
         self.routing_table.insert(Route {
             dst_addr: up_if.src_addr,
             gateway: up_if.src_addr,
@@ -319,7 +297,6 @@ impl InternetModule {
             // - if a route's metric is INFINITY, mark for deletion
             // - SH w/ PR
             let mut to_delete = HashSet::new();
-            // let ifs = ifs.read().unwrap();
             for dest_if in ifs.iter() {
                 let route_entries =
                     RouteEntry::process_updates(&updated_routes, &mut to_delete, dest_if);
@@ -351,8 +328,6 @@ impl InternetModule {
                 thread::sleep(Duration::from_secs(UPDATE_TIME / 5));
             }
 
-            // let rt = rt.lock().unwrap();
-            // let ifs = ifs.read().unwrap();
             // for each network interface:
             for dest_if in ifs.iter() {
                 // get processed route entries, and send
@@ -367,7 +342,6 @@ impl InternetModule {
     pub fn make_ip_listener(&self, stopped: Arc<AtomicBool>) -> thread::JoinHandle<()> {
         let this = self.clone();
         // get any NetworkInterface from the list of interfaces
-        // let net_if = { this.interfaces.read().unwrap().get_net_if().clone() };
         let net_if = this.interfaces.get_net_if();
         thread::spawn(move || loop {
             // if stopped, we're done

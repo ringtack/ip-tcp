@@ -131,12 +131,10 @@ impl Node {
         node.threads
             .push(node.ip_module.make_periodic_updates(stopped.clone()));
 
-        // let ifs = ifs.read().unwrap();
         // send initial RIP Request to network interfaces (i.e. neighbors)
         for dest_if in ifs.iter() {
             send_rip_message(dest_if, RIPMessage::new(RIP_REQUEST, 0, vec![]))?;
         }
-        // mem::drop(ifs);
 
         // Set up packet listener thread
         node.threads
@@ -234,11 +232,8 @@ impl Node {
     pub fn send_data(&self, ip: String, protocol: u8, payload: String) -> Result<()> {
         let dst_addr = str_2_ipv4(&ip)?;
 
-        // find local interface
-        // let routing_table = self.ip_module.routing_table.lock().unwrap();
-        // check if one of the destinations
+        // find local interface and check if one of the destinations
         if let Some(route) = self.ip_module.routing_table.get_route(&dst_addr) {
-            // mem::drop(routing_table);
             self.ip_module.handle_ip(IPPacket::new(
                 route.gateway,
                 dst_addr,

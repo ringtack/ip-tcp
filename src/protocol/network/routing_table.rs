@@ -25,6 +25,7 @@ pub const ROUTE_TIMEOUT: u64 = 12;
  * Routing Table. Maps destination addresses to routes.
  */
 pub struct RoutingTable {
+    // use DashMap for concurrent read/writes
     routes: DashMap<Ipv4Addr, Route>,
 }
 
@@ -140,12 +141,10 @@ impl RoutingTable {
             thread::sleep(Duration::from_millis(CHECK_TIMEOUTS));
 
             let timeout = Duration::from_secs(ROUTE_TIMEOUT);
-            // let mut rt = rt.lock().unwrap();
             // for each route:
             for mut route_entry in rt.iter_mut() {
                 let dst_addr = *route_entry.key();
                 let route = route_entry.value_mut();
-                // let mut route = route_entry.value().clone();
                 // if:
                 // - not a local entry (i.e. cost > 0) and time since now and last updated > TIMEOUT
                 // - cost is INFINITY

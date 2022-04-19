@@ -390,7 +390,6 @@ fn handle_rip_request(
         // remote is dst of network interface, and gateway is src
         let (remote_addr, gateway_addr) = (net_if.dst_addr, net_if.src_addr);
 
-        // let mut routing_table = rt.lock().unwrap();
         // add incoming connection to routing table; has to be best path
         rt.insert(Route {
             dst_addr: remote_addr,
@@ -442,7 +441,6 @@ fn handle_rip_response(
     // remote is dst of network interface, and gateway is src
     let (remote_addr, gateway_addr) = (net_if.dst_addr, net_if.src_addr);
 
-    // let mut routing_table = rt.lock().unwrap();
     // process each entry
     for entry in &msg.entries {
         // first, validate entry
@@ -533,8 +531,6 @@ pub fn make_rip_handler(
     trigger: Sender<Ipv4Addr>,
 ) -> Handler {
     Arc::new(Mutex::new(move |packet: IPPacket| -> Result<()> {
-        // let interfaces = interfaces.read().unwrap();
-
         // get source (opposite IP) and gateway IP address (this is the destination of the packet!)
         let remote_addr = Ipv4Addr::from(packet.header.source);
         let gateway_addr = Ipv4Addr::from(packet.header.destination);
