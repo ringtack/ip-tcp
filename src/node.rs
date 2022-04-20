@@ -2,10 +2,10 @@ use crate::protocol::link::READ_TIMEOUT;
 use crate::protocol::network::{
     ip_packet::*, network_interfaces::*, rip::*, routing_table::*, test::*, InternetModule,
 };
-use crate::protocol::tcp::{tcp_socket::*, *};
+use crate::protocol::tcp::{tcp_utils::make_tcp_handler, *};
 
+use dashmap::DashMap;
 use std::{
-    collections::HashMap,
     fs::File,
     io::{BufRead, BufReader, Error, ErrorKind, Lines, Result},
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
@@ -25,9 +25,10 @@ use std::{
  */
 pub struct Node {
     ip_module: InternetModule,
-    tcp_layer: TCPLayer,
+    tcp_module: TCPModule,
     trigger: Sender<Ipv4Addr>,
-    threads: Vec<thread::JoinHandle<()>>,
+    ip_threads: Vec<thread::JoinHandle<()>>,
+    tcp_threads: Vec<thread::JoinHandle<()>>,
     stopped: Arc<AtomicBool>,
 }
 
@@ -86,49 +87,81 @@ impl Node {
                 timer: Instant::now(),
             })?;
         }
-        // Create initial structs for Node construction
+        /* ====================================================================
+         * Protocol Handlers Setup
+         * ====================================================================
+         */
+        // Create structs for InternetModule construction
         let ifs = Arc::new(ifs);
         let rt = Arc::new(rt);
         let stopped = Arc::new(AtomicBool::new(false));
         // create sender and receiver for trigger updates
         let (tx, rx) = channel::<Ipv4Addr>();
 
+        // Create structs for TCPModule construction [TODO: need this scuffed way so I don't need
+        // to use a RwLock/Mutex for the handlers map... need a better way of doing this]
+        // let sockets = SocketTable::new();
+        // let listen_queue = Arc::new(DashMap::new());
+        // let pending_socks = Arc::new(DashSet::new());
+        // let (send_tx, send_rx) = sync_channel(CHAN_BOUND);
+        // let (accept_tx, accept_rx) = channel();
+        // let (segment_tx, segment_rx) = channel();
+
+        let handlers = Arc::new(DashMap::new());
+        let ip_module = InternetModule::new(rt.clone(), ifs.clone(), handlers.clone());
+        // create Node!
+        let mut node = Node {
+            ip_module: ip_module.clone(),
+            tcp_module: TCPModule::new(
+                ip_module,
+                // sockets,
+                // listen_queue,
+                // pending_socks,
+                // send_tx,
+                // send_rx,
+                // accept_tx,
+                // accept_rx,
+                // segment_tx,
+                // segment_rx,
+            ),
+            trigger: tx.clone(),
+            ip_threads: Vec::new(),
+            tcp_threads: Vec::new(),
+            stopped: stopped.clone(),
+        };
+
         /* ====================================================================
          * Protocol Handlers Setup
          * ====================================================================
          */
-        let mut handlers = HashMap::new();
         handlers.insert(TEST_PROTOCOL, make_test_handler(ifs.clone()));
         handlers.insert(
             RIP_PROTOCOL,
             make_rip_handler(ifs.clone(), rt.clone(), tx.clone()),
         );
-        let handlers = Arc::new(handlers);
-
-        let ip_module = InternetModule::new(rt.clone(), ifs.clone(), handlers);
-        // create Node!
-        let mut node = Node {
-            ip_module: ip_module.clone(),
-            tcp_layer: TCPLayer::new(ip_module),
-            trigger: tx.clone(),
-            threads: Vec::new(),
-            stopped: stopped.clone(),
-        };
-
+        handlers.insert(
+            TCP_PROTOCOL,
+            make_tcp_handler(
+                node.tcp_module.sockets.clone(),
+                node.tcp_module.pending_socks.clone(),
+                node.tcp_module.accept_tx.clone(),
+                node.tcp_module.segment_tx.clone(),
+            ),
+        );
         /* ====================================================================
          * Thread Handlers Setup
          * ====================================================================
          */
         // set up cleanup thread in RoutingTable
-        node.threads
+        node.ip_threads
             .push(RoutingTable::make_rt_cleanup(rt, tx, stopped.clone()));
 
         // set up trigger response thread
-        node.threads
+        node.ip_threads
             .push(node.ip_module.make_trigger_response(rx, stopped.clone()));
 
         // set up periodic RIP update thread
-        node.threads
+        node.ip_threads
             .push(node.ip_module.make_periodic_updates(stopped.clone()));
 
         // send initial RIP Request to network interfaces (i.e. neighbors)
@@ -137,7 +170,7 @@ impl Node {
         }
 
         // Set up packet listener thread
-        node.threads
+        node.ip_threads
             .push(node.ip_module.clone().make_ip_listener(stopped));
 
         // print out startup interfaces
@@ -154,7 +187,7 @@ impl Node {
         self.stopped.store(true, Ordering::Relaxed);
 
         // join all threads
-        while let Some(cur_thr) = self.threads.pop() {
+        while let Some(cur_thr) = self.ip_threads.pop() {
             cur_thr.join().expect("Thread failed to join.");
         }
 
@@ -171,6 +204,65 @@ impl Node {
             "help" | "h" => println!("{}", HELP_MSG),
             "interfaces" | "li" => println!("{}", self.ip_module.fmt_interfaces()),
             "routes" | "lr" => println!("{}", self.ip_module.fmt_routes()),
+            "sockets" | "ls" => println!("{}", self.tcp_module.fmt_sockets()),
+            "a" => {
+                if args.len() != 2 {
+                    eprintln!("Usage: \"a <port>\"");
+                } else {
+                    match args[1].parse::<u16>() {
+                        Ok(port) => {
+                            let listener_id = match self.tcp_module.v_listen(0.into(), port) {
+                                Ok(l_id) => l_id,
+                                Err(e) => {
+                                    eprintln!("{}", e);
+                                    return;
+                                }
+                            };
+                            let tcp_module = self.tcp_module.clone();
+                            thread::spawn(move || loop {
+                                // Continually accept and print information about established
+                                // connections
+                                let c_id = match tcp_module.v_accept(listener_id) {
+                                    Ok(c_id) => c_id,
+                                    Err(e) => {
+                                        eprintln!("{}", e);
+                                        break;
+                                    }
+                                };
+
+                                // print info about connection
+                                let (src_sock, dst_sock) = tcp_module.get_sock_entry(c_id).unwrap();
+                                println!("[{}] Established connection to {}", src_sock, dst_sock);
+                            });
+                        }
+                        Err(e) => eprintln!("{}", e),
+                    }
+                }
+            }
+            "c" => {
+                if args.len() != 3 {
+                    eprintln!("Usage: \"c <ip> <port>\"");
+                } else {
+                    match args[2].parse::<u16>() {
+                        Ok(port) => {
+                            let addr = match str_2_ipv4(args[1]) {
+                                Ok(addr) => addr,
+                                Err(e) => {
+                                    eprintln!("Error parsing address: {}", e);
+                                    return;
+                                }
+                            };
+                            match self.tcp_module.v_connect(addr, port) {
+                                Ok(c_id) => {
+                                    println!("Opened new socket with ID {}.", c_id);
+                                }
+                                Err(e) => eprintln!("{}", e),
+                            };
+                        }
+                        Err(e) => eprintln!("{}", e),
+                    }
+                }
+            }
             "down" => {
                 if args.len() != 2 {
                     eprintln!("Usage: \"down <id>\"");
@@ -277,6 +369,10 @@ const HELP_MSG: &str = " help (h)        : Print this list of commands
  interfaces (li) : Print information about each interface, one per line
  routes (lr)     : Print information about the route to each known destination, one per line
  quit (q)        : Quit this node
+
+ sockets (ls)    : Print information about each socket (ID, IP, Port, State)
+ a [port]        : Spawn a socket, bind it to the given port, and start accepting connections on that port.
+ c [ip] [port]   : Attempt to connect to the given ip address, in dot notation, on the given port.
 
  send [ip] [protocol] [payload] : sends payload with protocol=protocol to virtual-ip ip
  up [integer]   : Bring an interface \"up\" (it must be an existing interface, probably one you brought down)

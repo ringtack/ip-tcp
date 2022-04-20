@@ -1,13 +1,13 @@
-use crate::protocol::link::MTU;
-use std::net::SocketAddrV4;
+use crate::protocol::{link::MTU, network::ip_packet::*, tcp::*};
+
+use std::fmt;
 
 pub const BUF_SIZE: u16 = u16::MAX;
 // -20 for size of TCP Header without options
 pub const MSS: usize = MTU - 20;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum TCPState {
-    Closed,
     Listen,
     SynSent,
     SynRcvd,
@@ -20,16 +20,40 @@ pub enum TCPState {
     LastAck,
 }
 
-use TCPState::*;
+impl fmt::Display for TCPState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match &*self {
+                TCPState::Listen => "LISTEN",
+                TCPState::SynSent => "SYN SENT",
+                TCPState::SynRcvd => "SYN RCVD",
+                TCPState::Established => "ESTAB",
+                TCPState::FinWait1 => "FIN WAIT 1",
+                TCPState::FinWait2 => "FIN WAIT 2",
+                TCPState::Closing => "CLOSING",
+                TCPState::CloseWait => "CLOSE WAIT",
+                TCPState::TimeWait => "TIME WAIT",
+                TCPState::LastAck => "LAST ACK",
+            }
+        )
+    }
+}
 
 #[derive(Clone)]
 pub struct Socket {
-    src_sock: SocketAddrV4,
-    dst_sock: SocketAddrV4,
-    tcp_state: TCPState,
-    seg: SegmentVariables,
-    snd: SendSequence,
-    rcv: RecvSequence,
+    pub src_sock: SocketAddrV4,
+    pub dst_sock: SocketAddrV4,
+    pub tcp_state: TCPState,
+
+    // Send/Receive Control Variables
+    pub seg: SegmentVariables,
+    pub snd: SendSequence,
+    pub rcv: RecvSequence,
+
+    // Send/Receive Buffers/Channels
+    send_tx: SyncSender<IPPacket>,
     // send_buffer (TODO: what size?)
     // recv_buffer (TODO: what size?)
     // retransmit_queue (TODO: which data structure?)
@@ -37,7 +61,12 @@ pub struct Socket {
 }
 
 impl Socket {
-    pub fn new(src_sock: SocketAddrV4, dst_sock: SocketAddrV4, tcp_state: TCPState) -> Socket {
+    pub fn new(
+        src_sock: SocketAddrV4,
+        dst_sock: SocketAddrV4,
+        tcp_state: TCPState,
+        send_tx: SyncSender<IPPacket>,
+    ) -> Socket {
         Socket {
             src_sock,
             dst_sock,
@@ -45,7 +74,102 @@ impl Socket {
             seg: SegmentVariables::new(),
             snd: SendSequence::new(),
             rcv: RecvSequence::new(),
+            send_tx,
         }
+    }
+
+    /**
+     * Sends a SYN segment to the destination.
+     */
+    pub fn send_syn(&self, dst_sock: SocketAddrV4) -> Result<()> {
+        println!("[{}] sending SYN to {}...", self.src_sock, self.dst_sock);
+
+        // create TCP segment/IP packet
+        let segment = TCPSegment::new_syn(self.src_sock, dst_sock, self.snd.iss);
+        let packet = IPPacket::new(
+            *self.src_sock.ip(),
+            *dst_sock.ip(),
+            segment.to_bytes()?,
+            TCP_TTL,
+            TCP_PROTOCOL,
+        );
+
+        // send to channel to process
+        if self.send_tx.send(packet).is_ok() {}
+        Ok(())
+    }
+
+    /**
+     * Sends a SYN+ACK segment to other end of connection.
+     */
+    pub fn send_syn_ack(&self) -> Result<()> {
+        println!(
+            "[{}] sending SYN+ACK to {}...",
+            self.src_sock, self.dst_sock
+        );
+
+        // create TCP segment/IP packet
+        let segment = TCPSegment::new_syn_ack(
+            self.src_sock,
+            self.dst_sock,
+            self.snd.iss,
+            self.rcv.nxt,
+            WIN_SZ,
+        );
+        let packet = IPPacket::new(
+            *self.src_sock.ip(),
+            *self.dst_sock.ip(),
+            segment.to_bytes()?,
+            TCP_TTL,
+            TCP_PROTOCOL,
+        );
+
+        // send to channel to process
+        if self.send_tx.send(packet).is_ok() {}
+        Ok(())
+    }
+
+    /**
+     * Sends an ACK segment to other end of connection. [TODO: piggyback off data, if possible]
+     */
+    pub fn send_ack(&self, sync: bool) -> Result<()> {
+        let segment = if sync {
+            println!(
+                "[{}] !!!SYNC!!! sending SYN+ACK to {}...",
+                self.src_sock, self.dst_sock
+            );
+            // if synchronous, SEQ = ISS = SND.UNA, and send SYN+ACK
+            TCPSegment::new_syn_ack(
+                self.src_sock,
+                self.dst_sock,
+                self.snd.una,
+                self.rcv.nxt,
+                WIN_SZ,
+            )
+        } else {
+            println!("[{}] sending ACK to {}...", self.src_sock, self.dst_sock);
+            // otherwise, SEQ = SND.NXT, and send ACK [TODO: plus piggyback data, if possible]
+            TCPSegment::new(
+                self.src_sock,
+                self.dst_sock,
+                self.snd.nxt,
+                self.rcv.nxt,
+                WIN_SZ,
+                Vec::new(),
+            )
+        };
+        // create IP packet
+        let packet = IPPacket::new(
+            *self.src_sock.ip(),
+            *self.dst_sock.ip(),
+            segment.to_bytes()?,
+            TCP_TTL,
+            TCP_PROTOCOL,
+        );
+
+        // send to channel to process
+        if self.send_tx.send(packet).is_ok() {}
+        Ok(())
     }
 }
 
@@ -153,10 +277,10 @@ impl SendSequence {
  */
 #[derive(Clone)]
 pub struct RecvSequence {
-    pub nxt: u16,
+    pub nxt: u32,
     pub wnd: u16,
     pub up: u16,
-    pub irs: u16,
+    pub irs: u32,
 }
 
 impl RecvSequence {

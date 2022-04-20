@@ -7,9 +7,11 @@ pub mod test;
 
 use crate::protocol::link::MTU;
 
+use dashmap::DashMap;
+
 use rand::Rng;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     io::{Error, ErrorKind, Result},
     net::Ipv4Addr,
     sync::{
@@ -39,19 +41,36 @@ pub type Handler = Arc<Mutex<dyn FnMut(IPPacket) -> Result<()> + Send>>;
 pub struct InternetModule {
     pub routing_table: Arc<RoutingTable>,
     pub interfaces: Arc<NetworkInterfaces>,
-    pub handlers: Arc<HashMap<u8, Handler>>,
+    pub handlers: Arc<DashMap<u8, Handler>>,
 }
 
 impl InternetModule {
     pub fn new(
         routing_table: Arc<RoutingTable>,
         interfaces: Arc<NetworkInterfaces>,
-        handlers: Arc<HashMap<u8, Handler>>,
+        handlers: Arc<DashMap<u8, Handler>>,
     ) -> InternetModule {
         InternetModule {
             routing_table,
             interfaces,
             handlers,
+        }
+    }
+
+    pub fn register_handler(&self, protocol: u8, handler: Handler) {
+        self.handlers.insert(protocol, handler);
+    }
+
+    /**
+     * Gets the gateway address of the route to the destination address.
+     *
+     * Returns:
+     * - the gateway address of the network interface, or None if no route.
+     */
+    pub fn get_gateway(&self, addr: &Ipv4Addr) -> Option<Ipv4Addr> {
+        match self.routing_table.get_route(addr) {
+            Some(route) => Some(route.gateway),
+            None => None,
         }
     }
 
@@ -101,7 +120,15 @@ impl InternetModule {
         if is_local {
             let protocol = packet.header.protocol;
             if self.handlers.contains_key(&protocol) {
-                let mut handler = self.handlers[&protocol].lock().unwrap();
+                let handler = match self.handlers.get_mut(&protocol) {
+                    Some(handler) => handler,
+                    None => {
+                        eprintln!("Received invalid protocol {}", protocol);
+                        return;
+                    }
+                };
+                // let mut handler = self.handlers[&protocol].lock().unwrap();
+                let mut handler = handler.lock().unwrap();
                 if handler(packet).is_ok() {}
             }
         } else {
