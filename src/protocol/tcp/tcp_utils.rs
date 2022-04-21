@@ -34,7 +34,7 @@ pub fn make_accept_loop(
     send_tx: SyncSender<IPPacket>,
     socket_table: SocketTable,
     pending_socks: Arc<DashSet<SocketEntry>>,
-    listen_queue: Arc<DashMap<SocketEntry, ConcurrentQueue<SocketID>>>,
+    listen_queue: Arc<DashMap<SocketEntry, SynchronizedQueue<SocketID>>>,
     next_id: Arc<AtomicU8>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -127,9 +127,9 @@ pub fn make_accept_loop(
                 Some(mut cq) => cq.value_mut().push(new_id),
                 None => {
                     // make one if non-existent
-                    let mut concurrent_queue = ConcurrentQueue::new();
-                    concurrent_queue.push(new_id);
-                    listen_queue.insert(sock_entry, concurrent_queue);
+                    let mut synchronized_queue = SynchronizedQueue::new();
+                    synchronized_queue.push(new_id);
+                    listen_queue.insert(sock_entry, synchronized_queue);
                 }
             }
 
@@ -184,80 +184,84 @@ pub fn make_segment_loop(
                 rcv.irs = seq_no;
                 if ack {
                     snd.una = ack_no;
-                    // TODO: remove relevant sections on retransmission queue
                 }
+                // TODO: remove relevant sections on retransmission queue
 
-                // we've already verified ACK here, so just check if sync-SYN or SYN-ACK
-                let sync = snd.una == snd.iss;
-                // if synchronous SYN, set to SYN-RECEIVED; otherwise, ESTABLISHED
-                *tcp_state = if sync {
+                // if synchronous SYN, set to SYN-RECEIVED and send SYN-ACK back
+                if snd.una == snd.iss {
                     // insert into pending sockets; we're waiting for an ACK
                     pending_socks.insert(sock_entry.clone());
-                    TCPState::SynRcvd
+                    *tcp_state = TCPState::SynRcvd;
+
+                    print!("!!!SYNC!!! ");
+                    // send SYN+ACK back
+                    if sock.send_syn_ack(snd.una, rcv.nxt).is_ok() {}
                 } else {
+                    // otherwise, we've received SYN+ACK, so send SYN back and mark established
                     println!("[segment_loop] received SYN+ACK! establishing connection...");
                     // remove from pending sockets; we just got an ACK
                     pending_socks.remove(&sock_entry);
-                    TCPState::Established
-                };
+                    *tcp_state = TCPState::Established;
 
-                let sid = sockets.get_socket_id(&sock_entry).unwrap();
-                sockets.insert_entry(sid, sock_entry, sock.clone());
-
-                // send SYN+ACK/ACK to other end
-                if sock.send_ack(sync, snd.una, snd.nxt, rcv.nxt).is_ok() {}
-            } else {
-                //// otherwise, check acceptability of segment:
-                // - if rcv window = 0 and not an initial SYN
-                // - if rcv window > 0 and SYN not in window
-                // - if rcv window = 0 and has data
-                // - if rcv window > 0 and neither start nor end in window
-                if (seg_len == 0 && rcv.wnd == 0 && seq_no != rcv.nxt)
-                    || (seg_len == 0 && rcv.wnd > 0 && !in_rcv_window(&sock, seq_no))
-                    || (seg_len > 0 && rcv.wnd == 0)
-                    || (seg_len > 0
-                        && rcv.wnd > 0
-                        && !in_rcv_window(&sock, seq_no)
-                        && !in_rcv_window(&sock, seq_no + seg_len))
-                {
-                    eprintln!("[segment_loop] unacceptable segment; dropping...");
-                    // if any of those conditions fail, then not acceptable, so send ACK
-                    if sock.send_ack(false, snd.una, snd.nxt, rcv.nxt).is_ok() {}
-                    // drop packet
-                    continue;
+                    // send ACK back
+                    if sock.send_ack(snd.nxt, rcv.nxt).is_ok() {}
                 }
 
-                // if SYN packet:
-                if syn {
-                    // if packet in window, error, so drop
-                    if in_rcv_window(&sock, seq_no) {
-                        eprintln!("[segment_loop] SYN in RCV window illegal, dropping...");
+                // [NB: I structured it like this to prevent giga indents]
+                continue;
+            }
 
-                        // TODO: cleanup:
-                        // - flush all queues
-                        // - send user an unsolicited "connection reset" signal
-                        // - enter closed state, i.e. delete Socket
-                        sockets.delete_socket_by_entry(&sock_entry);
-                    }
-                    // seqno checking handles when syn outside of rcv window
-                    // if not ACK, we just drop, so only handle ACK case
-                } else if ack {
-                    // if in SYN_RCVD state...
-                    if *tcp_state == TCPState::SynRcvd {
-                        // and ACK in SND window, move to ESTABLISHED
-                        if snd.una <= ack_no && ack_no <= snd.nxt {
-                            *tcp_state = TCPState::Established;
+            //// for all other states, check acceptability of segment:
+            // - if rcv window = 0 and not an initial SYN
+            // - if rcv window > 0 and SYN not in window
+            // - if rcv window = 0 and has data
+            // - if rcv window > 0 and neither start nor end in window
+            if (seg_len == 0 && rcv.wnd == 0 && seq_no != rcv.nxt)
+                || (seg_len == 0 && rcv.wnd > 0 && !in_rcv_window(&sock, seq_no))
+                || (seg_len > 0 && rcv.wnd == 0)
+                || (seg_len > 0
+                    && rcv.wnd > 0
+                    && !in_rcv_window(&sock, seq_no)
+                    && !in_rcv_window(&sock, seq_no + seg_len))
+            {
+                eprintln!("[segment_loop] unacceptable segment; dropping...");
 
-                            // remove from pending queue
-                            pending_socks.remove(&sock_entry);
+                // if any of those conditions fail, then not acceptable, so send ACK back
+                if sock.send_ack(snd.nxt, rcv.nxt).is_ok() {}
+                // drop packet
+                continue;
+            }
 
-                            // TODO: additional processing of data
-                        }
-                        // if outside window, drop segment
-                    } else if *tcp_state == TCPState::Established {
-                        // processing...
-                    }
-                }
+            // if SYN packet:
+            if syn {
+                // if packet in window, error, so drop
+                if in_rcv_window(&sock, seq_no) {
+                    eprintln!("[segment_loop] SYN in RCV window illegal, dropping...");
+
+                    // TODO: cleanup:
+                    // - flush all queues
+                    // - send user an unsolicited "connection reset" signal
+                    // - enter closed state, i.e. delete Socket
+                    sockets.delete_socket_by_entry(&sock_entry);
+                } // else { drop } -> seqno checking handles when syn outside of rcv window
+            } else if !ack {
+                // [NB: I structured it like this to prevent giga indents]
+                continue; // if not ACK, we just drop, so only handle ACK case
+            }
+
+            // if in SYN_RCVD state...
+            if *tcp_state == TCPState::SynRcvd {
+                // and ACK in SND window, move to ESTABLISHED
+                if snd.una <= ack_no && ack_no <= snd.nxt {
+                    *tcp_state = TCPState::Established;
+
+                    // remove from pending queue
+                    pending_socks.remove(&sock_entry);
+
+                    // TODO: additional processing of data
+                } // else { drop } -> if outside window, drop segment
+            } else if *tcp_state == TCPState::Established {
+                // processing...
             }
         }
 
@@ -336,12 +340,12 @@ pub fn make_tcp_handler(
                 println!("[tcp_handler] TODO: more informative error message");
             }
             // if in pending_socks, socket is in SYN_SENT/SYN_RCVD state
-            // TODO: should we offload to (threadpooled) segment_tx, or just do checks here?
         } else if pending_socks.contains(&sock_entry) {
+            // TODO: should we offload to segment_loop, or just do checks here?
             let ackno = tcp_seg.header.acknowledgment_number;
             // ensure that ACKNO is in correct spot; if so, send to segment_loop
             if snd.una <= ackno && ackno <= snd.nxt && segment_tx.send(packet).is_ok() {}
-        } else {
+        } else if *tcp_state == TCPState::Established {
             // other stuff TODO: like whatttt
         }
 

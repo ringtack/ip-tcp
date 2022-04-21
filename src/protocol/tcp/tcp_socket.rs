@@ -1,6 +1,13 @@
-use crate::protocol::{link::MTU, network::ip_packet::*, tcp::*};
+// use concurrent_queue::ConcurrentQueue;
+use rb::{Consumer, Producer, SpscRb};
 
 use std::fmt;
+
+use crate::protocol::{
+    link::MTU,
+    network::ip_packet::*,
+    tcp::{synchronized_queue::*, *},
+};
 
 pub const BUF_SIZE: u16 = u16::MAX;
 // -20 for size of TCP Header without options
@@ -54,9 +61,10 @@ pub struct Socket {
 
     // Send/Receive Buffers/Channels
     send_tx: SyncSender<IPPacket>,
-    // send_buffer (TODO: what size?)
-    // recv_buffer (TODO: what size?)
-    // retransmit_queue (TODO: which data structure?)
+
+    send_rb: Arc<SpscRb<u8>>,
+    recv_rb: Arc<SpscRb<u8>>,
+    // retransmit_queue: SynchronizedQueue<TCPSegment>,
     // current_segment (TODO: what needs to be represented?)
 }
 
@@ -75,6 +83,9 @@ impl Socket {
             snd: Arc::new(Mutex::new(SendSequence::new())),
             rcv: Arc::new(Mutex::new(RecvSequence::new())),
             send_tx,
+            //.
+            send_rb: Arc::new(SpscRb::new(BUF_SIZE as usize)),
+            recv_rb: Arc::new(SpscRb::new(BUF_SIZE as usize)),
         }
     }
 
@@ -127,26 +138,17 @@ impl Socket {
     /**
      * Sends an ACK segment to other end of connection. [TODO: piggyback off data, if possible]
      */
-    pub fn send_ack(&self, sync: bool, snd_una: u32, snd_nxt: u32, rcv_nxt: u32) -> Result<()> {
-        let segment = if sync {
-            println!(
-                "[{}] !!!SYNC!!! sending SYN+ACK to {}...",
-                self.src_sock, self.dst_sock
-            );
-            // if synchronous, SEQ = ISS = SND.UNA, and send SYN+ACK
-            TCPSegment::new_syn_ack(self.src_sock, self.dst_sock, snd_una, rcv_nxt, WIN_SZ)
-        } else {
-            println!("[{}] sending ACK to {}...", self.src_sock, self.dst_sock);
-            // otherwise, SEQ = SND.NXT, and send ACK [TODO: plus piggyback data, if possible]
-            TCPSegment::new(
-                self.src_sock,
-                self.dst_sock,
-                snd_nxt,
-                rcv_nxt,
-                WIN_SZ,
-                Vec::new(),
-            )
-        };
+    pub fn send_ack(&self, snd_nxt: u32, rcv_nxt: u32) -> Result<()> {
+        println!("[{}] sending ACK to {}...", self.src_sock, self.dst_sock);
+        // create TCP segment/IP packet
+        let segment = TCPSegment::new(
+            self.src_sock,
+            self.dst_sock,
+            snd_nxt,
+            rcv_nxt,
+            WIN_SZ,
+            Vec::new(),
+        );
         // create IP packet
         let packet = IPPacket::new(
             *self.src_sock.ip(),

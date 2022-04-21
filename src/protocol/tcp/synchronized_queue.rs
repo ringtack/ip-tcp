@@ -7,7 +7,7 @@ use std::{
 };
 
 #[derive(Clone)]
-pub struct ConcurrentQueue<T>
+pub struct SynchronizedQueue<T>
 where
     T: Clone,
 {
@@ -16,15 +16,15 @@ where
     stopped: Arc<AtomicBool>,
 }
 
-impl<T> ConcurrentQueue<T>
+impl<T> SynchronizedQueue<T>
 where
     T: Clone,
 {
     /**
-     * Creates an empty ConcurrentQueue.
+     * Creates an empty SynchronizedQueue.
      */
-    pub fn new() -> ConcurrentQueue<T> {
-        ConcurrentQueue {
+    pub fn new() -> SynchronizedQueue<T> {
+        SynchronizedQueue {
             queue: Arc::new(Mutex::new(VecDeque::new())),
             queue_cv: Arc::new(Condvar::new()),
             stopped: Arc::new(AtomicBool::new(false)),

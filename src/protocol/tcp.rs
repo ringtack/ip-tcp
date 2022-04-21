@@ -1,5 +1,5 @@
-pub mod concurrent_queue;
 pub mod socket_table;
+pub mod synchronized_queue;
 pub mod tcp_segment;
 pub mod tcp_socket;
 pub mod tcp_utils;
@@ -19,7 +19,7 @@ use std::{
     thread::JoinHandle,
 };
 
-use self::{concurrent_queue::*, socket_table::*, tcp_segment::*, tcp_socket::*, tcp_utils::*};
+use self::{socket_table::*, synchronized_queue::*, tcp_segment::*, tcp_socket::*, tcp_utils::*};
 use crate::protocol::network::{ip_packet::*, Handler, InternetModule};
 
 pub const TCP_PROTOCOL: u8 = 6;
@@ -45,7 +45,7 @@ pub struct TCPModule {
 
     //// Listen and Pending (i.e. timed; TODO: perhaps change) connections
     // add to listen queue once passive OPEN spawns -> SYN_RCVD socket
-    listen_queue: Arc<DashMap<SocketEntry, ConcurrentQueue<SocketID>>>,
+    listen_queue: Arc<DashMap<SocketEntry, SynchronizedQueue<SocketID>>>,
     // add to pending queue once v_connect -> SYN_SENT, passive OPEN -> SYN_RCVD, or sync-SYN
     pub pending_socks: Arc<DashSet<SocketEntry>>,
 
@@ -154,7 +154,8 @@ impl TCPModule {
             Socket::new(src_sock, zero_sock, TCPState::Listen, self.send_tx.clone()),
         );
         // open listen queue for waiting
-        self.listen_queue.insert(sock_entry, ConcurrentQueue::new());
+        self.listen_queue
+            .insert(sock_entry, SynchronizedQueue::new());
 
         // id
         Ok(id)
