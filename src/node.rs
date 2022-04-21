@@ -211,7 +211,7 @@ impl Node {
                 } else {
                     match args[1].parse::<u16>() {
                         Ok(port) => {
-                            let listener_id = match self.tcp_module.v_listen(0.into(), port) {
+                            let l_id = match self.tcp_module.v_listen(0.into(), port) {
                                 Ok(l_id) => l_id,
                                 Err(e) => {
                                     eprintln!("{}", e);
@@ -222,17 +222,14 @@ impl Node {
                             thread::spawn(move || loop {
                                 // Continually accept and print information about established
                                 // connections
-                                let c_id = match tcp_module.v_accept(listener_id) {
+                                let c_id = match tcp_module.v_accept(l_id) {
                                     Ok(c_id) => c_id,
                                     Err(e) => {
                                         eprintln!("{}", e);
                                         break;
                                     }
                                 };
-
-                                // print info about connection
-                                let (src_sock, dst_sock) = tcp_module.get_sock_entry(c_id).unwrap();
-                                println!("[{}] Established connection to {}", src_sock, dst_sock);
+                                println!("v_accept({}) returned {}", l_id, c_id);
                             });
                         }
                         Err(e) => eprintln!("{}", e),

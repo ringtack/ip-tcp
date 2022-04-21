@@ -66,8 +66,7 @@ pub fn make_accept_loop(
             // update to reflect passive listener's socket entry
             sock_entry.dst_sock = zero_sock;
 
-            println!("[accept_loop] requested sock entry: {:#?}", sock_entry);
-
+            // println!("[accept_loop] requested sock entry: {:#?}", sock_entry);
             // check that socket entry for listener exists
             let socket = match socket_table.get_socket_by_entry(&sock_entry) {
                 Some(socket) => socket,
@@ -199,8 +198,8 @@ pub fn make_segment_loop(
                 } else {
                     // otherwise, we've received SYN+ACK, so send SYN back and mark established
                     println!(
-                        "[{}] received SYN+ACK! establishing connection...",
-                        sock.src_sock
+                        "[{}] received SYN+ACK! establishing connection to {}.",
+                        sock.src_sock, sock.dst_sock
                     );
                     // remove from pending sockets; we just got an ACK
                     pending_socks.remove(&sock_entry);
@@ -257,6 +256,10 @@ pub fn make_segment_loop(
             if *tcp_state == TCPState::SynRcvd {
                 // and ACK in SND window, move to ESTABLISHED
                 if snd.una <= ack_no && ack_no <= snd.nxt {
+                    println!(
+                        "[{}] Established connection to {}",
+                        sock.src_sock, sock.dst_sock
+                    );
                     *tcp_state = TCPState::Established;
 
                     // remove from pending queue
@@ -304,7 +307,8 @@ pub fn make_tcp_handler(
             return Ok(());
         }
 
-        // get socket entry of destination's socket
+        //// TCP Handler does verification that socket exists. In the other handlers (accept,
+        //segment), we can unwrap the socket from the socket entry.
         let sock_entry = get_socket_entry_in(&ip_hdr, &tcp_seg.header);
         let found_sock_entry = match find_sock_entry(&sock_entry, &sockets) {
             Some(fse) => fse,
