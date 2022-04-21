@@ -81,8 +81,9 @@ pub fn make_accept_loop(
                 }
             };
 
+            let tcp_state = socket.tcp_state.lock().unwrap();
             // assert that "Passive OPEN" socket in Listen state
-            if socket.tcp_state != TCPState::Listen {
+            if *tcp_state != TCPState::Listen {
                 continue;
             }
 
@@ -102,15 +103,16 @@ pub fn make_accept_loop(
             );
 
             // make new socket
-            let mut new_sock = Socket::new(src_sock, dst_sock, TCPState::SynRcvd, send_tx.clone());
+            let new_sock = Socket::new(src_sock, dst_sock, TCPState::SynRcvd, send_tx.clone());
             // - Select ISS [TODO: currently just 0]
             let iss = 0;
             let seq = syn_seg.header.sequence_number;
             // update socket's values:
-            new_sock.rcv.nxt = seq + 1;
-            new_sock.rcv.irs = seq;
-            new_sock.snd.nxt = iss + 1;
-            new_sock.snd.una = iss;
+            let (mut snd, mut rcv) = (new_sock.snd.lock().unwrap(), new_sock.rcv.lock().unwrap());
+            rcv.nxt = seq + 1;
+            rcv.irs = seq;
+            snd.nxt = iss + 1;
+            snd.una = iss;
 
             // get new socket entry and ID, and increment ID
             let new_sock_entry = SocketEntry { src_sock, dst_sock };
@@ -132,7 +134,7 @@ pub fn make_accept_loop(
             }
 
             // send SYN+ACK
-            if new_sock.send_syn_ack().is_ok() {}
+            if new_sock.send_syn_ack(snd.iss, rcv.nxt).is_ok() {}
         }
 
         eprintln!("accept loop terminated.");
@@ -165,38 +167,35 @@ pub fn make_segment_loop(
             // get socket entry of destination's socket
             let sock_entry = get_socket_entry_in(&ip_hdr, &tcp_seg.header);
 
-            /* ==============================================================================
-             * TODO TODO TODO: change socket locking to be much finer grained; get_mut blocks
-             * the entire socket table.
-             * ==============================================================================
-             */
             // get actual sock
-            let mut sock = sockets.get_socket_by_entry(&sock_entry).unwrap();
+            let sock = sockets.get_socket_by_entry(&sock_entry).unwrap();
 
+            let mut tcp_state = sock.tcp_state.lock().unwrap();
+            let (mut snd, mut rcv) = (sock.snd.lock().unwrap(), sock.rcv.lock().unwrap());
             // if SYN_SENT:
-            if sock.tcp_state == TCPState::SynSent {
+            if *tcp_state == TCPState::SynSent {
                 // if not SYN, drop segment
                 if !syn {
                     continue;
                 }
 
                 // update send/receive sequence values
-                sock.rcv.nxt = seq_no + 1;
-                sock.rcv.irs = seq_no;
+                rcv.nxt = seq_no + 1;
+                rcv.irs = seq_no;
                 if ack {
-                    sock.snd.una = ack_no;
+                    snd.una = ack_no;
                     // TODO: remove relevant sections on retransmission queue
                 }
 
                 // we've already verified ACK here, so just check if sync-SYN or SYN-ACK
-                let sync = sock.snd.una == sock.snd.iss;
+                let sync = snd.una == snd.iss;
                 // if synchronous SYN, set to SYN-RECEIVED; otherwise, ESTABLISHED
-                sock.tcp_state = if sync {
+                *tcp_state = if sync {
                     // insert into pending sockets; we're waiting for an ACK
                     pending_socks.insert(sock_entry.clone());
                     TCPState::SynRcvd
                 } else {
-                    println!("[segment_loop] received final ACK! establishing connection.");
+                    println!("[segment_loop] received SYN+ACK! establishing connection...");
                     // remove from pending sockets; we just got an ACK
                     pending_socks.remove(&sock_entry);
                     TCPState::Established
@@ -206,24 +205,24 @@ pub fn make_segment_loop(
                 sockets.insert_entry(sid, sock_entry, sock.clone());
 
                 // send SYN+ACK/ACK to other end
-                if sock.send_ack(sync).is_ok() {}
+                if sock.send_ack(sync, snd.una, snd.nxt, rcv.nxt).is_ok() {}
             } else {
                 //// otherwise, check acceptability of segment:
                 // - if rcv window = 0 and not an initial SYN
                 // - if rcv window > 0 and SYN not in window
                 // - if rcv window = 0 and has data
                 // - if rcv window > 0 and neither start nor end in window
-                if (seg_len == 0 && sock.rcv.wnd == 0 && seq_no != sock.rcv.nxt)
-                    || (seg_len == 0 && sock.rcv.wnd > 0 && !in_rcv_window(&sock, seq_no))
-                    || (seg_len > 0 && sock.rcv.wnd == 0)
+                if (seg_len == 0 && rcv.wnd == 0 && seq_no != rcv.nxt)
+                    || (seg_len == 0 && rcv.wnd > 0 && !in_rcv_window(&sock, seq_no))
+                    || (seg_len > 0 && rcv.wnd == 0)
                     || (seg_len > 0
-                        && sock.rcv.wnd > 0
+                        && rcv.wnd > 0
                         && !in_rcv_window(&sock, seq_no)
                         && !in_rcv_window(&sock, seq_no + seg_len))
                 {
                     eprintln!("[segment_loop] unacceptable segment; dropping...");
                     // if any of those conditions fail, then not acceptable, so send ACK
-                    if sock.send_ack(false).is_ok() {}
+                    if sock.send_ack(false, snd.una, snd.nxt, rcv.nxt).is_ok() {}
                     // drop packet
                     continue;
                 }
@@ -244,14 +243,10 @@ pub fn make_segment_loop(
                     // if not ACK, we just drop, so only handle ACK case
                 } else if ack {
                     // if in SYN_RCVD state...
-                    if sock.tcp_state == TCPState::SynRcvd {
+                    if *tcp_state == TCPState::SynRcvd {
                         // and ACK in SND window, move to ESTABLISHED
-                        if sock.snd.una <= ack_no && ack_no <= sock.snd.nxt {
-                            sock.tcp_state = TCPState::Established;
-
-                            // TODO FIX HACKY IMPLEMENTATION TODO
-                            let sid = sockets.get_socket_id(&sock_entry).unwrap();
-                            sockets.insert_entry(sid, sock_entry.clone(), sock.clone());
+                        if snd.una <= ack_no && ack_no <= snd.nxt {
+                            *tcp_state = TCPState::Established;
 
                             // remove from pending queue
                             pending_socks.remove(&sock_entry);
@@ -259,7 +254,7 @@ pub fn make_segment_loop(
                             // TODO: additional processing of data
                         }
                         // if outside window, drop segment
-                    } else if sock.tcp_state == TCPState::Established {
+                    } else if *tcp_state == TCPState::Established {
                         // processing...
                     }
                 }
@@ -311,9 +306,6 @@ pub fn make_tcp_handler(
             }
         };
 
-        // println!("[tcp_handler] {:?}", found_sock_entry);
-        // let listener = sock_entry == found_sock_entry;
-
         // get socket itself
         let sock = match sockets.get_socket_by_entry(&found_sock_entry) {
             Some(sock) => sock,
@@ -331,8 +323,11 @@ pub fn make_tcp_handler(
         //// Forward, based on TCP State:
         let syn = tcp_seg.header.syn;
         let ack = tcp_seg.header.ack;
+
+        let tcp_state = sock.tcp_state.lock().unwrap();
+        let (snd, _) = (sock.snd.lock().unwrap(), sock.rcv.lock().unwrap());
         // If LISTEN, forward to accept_loop only if SYN packet
-        if sock.tcp_state == TCPState::Listen {
+        if *tcp_state == TCPState::Listen {
             if ack {
                 return Err(Error::new(ErrorKind::ConnectionRefused, "no ACK listen!"));
             } else if syn {
@@ -340,14 +335,14 @@ pub fn make_tcp_handler(
             } else {
                 println!("[tcp_handler] TODO: more informative error message");
             }
-            // if in pending_socks, socket is in SYN_SENT state
+            // if in pending_socks, socket is in SYN_SENT/SYN_RCVD state
             // TODO: should we offload to (threadpooled) segment_tx, or just do checks here?
         } else if pending_socks.contains(&sock_entry) {
             let ackno = tcp_seg.header.acknowledgment_number;
-            // ensure that ACK_NO is in correct spot; if so, send to segment_loop
-            if sock.snd.una <= ackno && ackno <= sock.snd.nxt && segment_tx.send(packet).is_ok() {}
+            // ensure that ACKNO is in correct spot; if so, send to segment_loop
+            if snd.una <= ackno && ackno <= snd.nxt && segment_tx.send(packet).is_ok() {}
         } else {
-            // other stuff
+            // other stuff TODO: like whatttt
         }
 
         Ok(())
@@ -425,5 +420,6 @@ pub fn find_sock_entry(sock_entry: &SocketEntry, st: &SocketTable) -> Option<Soc
 }
 
 pub fn in_rcv_window(sock: &Socket, seq_no: u32) -> bool {
-    sock.rcv.nxt <= seq_no && seq_no < sock.rcv.nxt + sock.rcv.wnd as u32
+    let rcv = sock.rcv.lock().unwrap();
+    rcv.nxt <= seq_no && seq_no < rcv.nxt + rcv.wnd as u32
 }

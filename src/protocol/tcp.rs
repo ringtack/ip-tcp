@@ -216,15 +216,18 @@ impl TCPModule {
 
         // create socket ID and socket
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut sock = Socket::new(src_sock, dst_sock, TCPState::SynSent, self.send_tx.clone());
+        let sock = Socket::new(src_sock, dst_sock, TCPState::SynSent, self.send_tx.clone());
         // set socket values
         let isn = 0; // TODO: better ISN selection
-        sock.snd.iss = isn;
-        sock.snd.una = isn;
-        sock.snd.nxt = isn + 1;
+        {
+            let mut snd = sock.snd.lock().unwrap();
+            snd.iss = isn;
+            snd.una = isn;
+            snd.nxt = isn + 1;
+        }
 
         // send SYN segment
-        if sock.send_syn(dst_sock).is_ok() {}
+        if sock.send_syn(dst_sock, isn).is_ok() {}
 
         // insert into pending socks
         self.pending_socks.insert(sock_entry.clone());
@@ -250,7 +253,7 @@ impl TCPModule {
     pub fn fmt_sockets(&self) -> String {
         let mut res = String::new();
         res.push_str("socket\tlocal-addr\tport\t\tdst-addr\tport\tstatus\n");
-        res.push_str("-------------------------------------------------------------------\n");
+        res.push_str("----------------------------------------------------------------------\n");
 
         for (index, se) in self.sockets.iter().enumerate() {
             let id = self.sockets.get_socket_id(se.key()).unwrap();
@@ -264,6 +267,7 @@ impl TCPModule {
                 ""
             };
 
+            let tcp_state = se.value().tcp_state.lock().unwrap();
             res.push_str(
                 &(format!(
                     "{}\t{}\t{}\t\t{}\t{}\t{}",
@@ -272,7 +276,7 @@ impl TCPModule {
                     src_port,
                     dst_addr.to_string() + extra_tab,
                     dst_port,
-                    se.value().tcp_state
+                    *tcp_state
                 )),
             );
             if index != self.sockets.len() - 1 {

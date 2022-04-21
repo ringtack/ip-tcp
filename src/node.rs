@@ -314,6 +314,7 @@ impl Node {
                 self.quit();
                 process::exit(0);
             }
+            "" => println!(),
             _ => eprintln!("Error: command not found. Help menu:\n{}", HELP_MSG),
         }
     }

@@ -45,12 +45,12 @@ impl fmt::Display for TCPState {
 pub struct Socket {
     pub src_sock: SocketAddrV4,
     pub dst_sock: SocketAddrV4,
-    pub tcp_state: TCPState,
+    pub tcp_state: Arc<Mutex<TCPState>>,
 
     // Send/Receive Control Variables
-    pub seg: SegmentVariables,
-    pub snd: SendSequence,
-    pub rcv: RecvSequence,
+    pub seg: Arc<Mutex<SegmentVariables>>,
+    pub snd: Arc<Mutex<SendSequence>>,
+    pub rcv: Arc<Mutex<RecvSequence>>,
 
     // Send/Receive Buffers/Channels
     send_tx: SyncSender<IPPacket>,
@@ -70,10 +70,10 @@ impl Socket {
         Socket {
             src_sock,
             dst_sock,
-            tcp_state,
-            seg: SegmentVariables::new(),
-            snd: SendSequence::new(),
-            rcv: RecvSequence::new(),
+            tcp_state: Arc::new(Mutex::new(tcp_state)),
+            seg: Arc::new(Mutex::new(SegmentVariables::new())),
+            snd: Arc::new(Mutex::new(SendSequence::new())),
+            rcv: Arc::new(Mutex::new(RecvSequence::new())),
             send_tx,
         }
     }
@@ -81,11 +81,11 @@ impl Socket {
     /**
      * Sends a SYN segment to the destination.
      */
-    pub fn send_syn(&self, dst_sock: SocketAddrV4) -> Result<()> {
+    pub fn send_syn(&self, dst_sock: SocketAddrV4, iss: u32) -> Result<()> {
         println!("[{}] sending SYN to {}...", self.src_sock, self.dst_sock);
 
         // create TCP segment/IP packet
-        let segment = TCPSegment::new_syn(self.src_sock, dst_sock, self.snd.iss);
+        let segment = TCPSegment::new_syn(self.src_sock, dst_sock, iss);
         let packet = IPPacket::new(
             *self.src_sock.ip(),
             *dst_sock.ip(),
@@ -102,20 +102,15 @@ impl Socket {
     /**
      * Sends a SYN+ACK segment to other end of connection.
      */
-    pub fn send_syn_ack(&self) -> Result<()> {
+    pub fn send_syn_ack(&self, snd_iss: u32, rcv_nxt: u32) -> Result<()> {
         println!(
             "[{}] sending SYN+ACK to {}...",
             self.src_sock, self.dst_sock
         );
 
         // create TCP segment/IP packet
-        let segment = TCPSegment::new_syn_ack(
-            self.src_sock,
-            self.dst_sock,
-            self.snd.iss,
-            self.rcv.nxt,
-            WIN_SZ,
-        );
+        let segment =
+            TCPSegment::new_syn_ack(self.src_sock, self.dst_sock, snd_iss, rcv_nxt, WIN_SZ);
         let packet = IPPacket::new(
             *self.src_sock.ip(),
             *self.dst_sock.ip(),
@@ -132,28 +127,22 @@ impl Socket {
     /**
      * Sends an ACK segment to other end of connection. [TODO: piggyback off data, if possible]
      */
-    pub fn send_ack(&self, sync: bool) -> Result<()> {
+    pub fn send_ack(&self, sync: bool, snd_una: u32, snd_nxt: u32, rcv_nxt: u32) -> Result<()> {
         let segment = if sync {
             println!(
                 "[{}] !!!SYNC!!! sending SYN+ACK to {}...",
                 self.src_sock, self.dst_sock
             );
             // if synchronous, SEQ = ISS = SND.UNA, and send SYN+ACK
-            TCPSegment::new_syn_ack(
-                self.src_sock,
-                self.dst_sock,
-                self.snd.una,
-                self.rcv.nxt,
-                WIN_SZ,
-            )
+            TCPSegment::new_syn_ack(self.src_sock, self.dst_sock, snd_una, rcv_nxt, WIN_SZ)
         } else {
             println!("[{}] sending ACK to {}...", self.src_sock, self.dst_sock);
             // otherwise, SEQ = SND.NXT, and send ACK [TODO: plus piggyback data, if possible]
             TCPSegment::new(
                 self.src_sock,
                 self.dst_sock,
-                self.snd.nxt,
-                self.rcv.nxt,
+                snd_nxt,
+                rcv_nxt,
                 WIN_SZ,
                 Vec::new(),
             )
@@ -293,47 +282,3 @@ impl RecvSequence {
         }
     }
 }
-
-// #[derive(Clone)]
-// pub enum TCPTransition {
-// PassiveOpen,
-// ActiveOpen,
-// RcvSyn,
-// RcvSynAck,
-// RcvAck,
-// }
-
-// use TCPTransition::*;
-
-// pub const transitions: HashMap<(TCPState, TCPTransition), TCPState> = [
-// ((Closed, PassiveOpen), Listen),
-// ((Closed, ActiveOpen), SynSent),
-// ]
-// .iter()
-// .cloned()
-// .collect();
-
-// impl TCPState {
-// pub fn tcp_transition(state: TCPState, transition: TCPTransition) -> TCPState {
-// match state {
-// Closed => match transition {
-// PassiveOpen => Listen,
-// ActiveOpen => SynSent,
-// _ => Closed,
-// },
-// Listen => match transition {
-// RcvSyn => SynRcvd,
-// _ => Listen,
-// },
-// SynSent => match transition {
-// RcvSynAck => Established,
-// _ => SynSent,
-// },
-// SynRcvd => match transition {
-// RcvAck => Established,
-// _ => SynRcvd,
-// },
-// _ => state,
-// }
-// }
-// }
