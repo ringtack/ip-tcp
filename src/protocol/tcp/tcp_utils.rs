@@ -198,7 +198,10 @@ pub fn make_segment_loop(
                     if sock.send_syn_ack(snd.una, rcv.nxt).is_ok() {}
                 } else {
                     // otherwise, we've received SYN+ACK, so send SYN back and mark established
-                    println!("[segment_loop] received SYN+ACK! establishing connection...");
+                    println!(
+                        "[{}] received SYN+ACK! establishing connection...",
+                        sock.src_sock
+                    );
                     // remove from pending sockets; we just got an ACK
                     pending_socks.remove(&sock_entry);
                     *tcp_state = TCPState::Established;
@@ -244,6 +247,7 @@ pub fn make_segment_loop(
                     // - enter closed state, i.e. delete Socket
                     sockets.delete_socket_by_entry(&sock_entry);
                 } // else { drop } -> seqno checking handles when syn outside of rcv window
+                continue;
             } else if !ack {
                 // [NB: I structured it like this to prevent giga indents]
                 continue; // if not ACK, we just drop, so only handle ACK case
