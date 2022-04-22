@@ -1,6 +1,6 @@
 use dashmap::DashSet;
 
-use std::thread;
+use std::{thread, time::Instant};
 
 use crate::protocol::{
     network::{ip_packet::*, InternetModule},
@@ -292,6 +292,13 @@ pub fn make_segment_loop(
                     snd.set_una(seq_no, ack_no, seg_wnd);
                 }
 
+                // if WND == 0, add to pending_socks for zero probing
+                // if seg_wnd == 0 {
+                // let mut timer = sock.timer.lock().unwrap();
+                // *timer = Instant::now();
+                // pending_socks.insert(sock_entry);
+                // }
+
                 // if has data:
                 if !tcp_seg.data.is_empty() {
                     // fill up receive buffer [TODO: error handle]
@@ -316,6 +323,15 @@ pub fn make_shutdown_handler() -> thread::JoinHandle<()> {
         //
     })
 }
+
+/**
+ * Handles pending socket requests.
+ */
+// pub fn make_pending_sock_handler(
+// sockets: SocketTable,
+// pending_socks: Arc<DashSet<SocketEntry>>,
+// ) -> thread::JoinHandle<()> {
+// }
 
 /**
  * Construct TCP handler.

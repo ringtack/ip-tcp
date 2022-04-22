@@ -14,8 +14,8 @@ use crate::protocol::{
     tcp::{control_buffers::*, tcp_errors::*, *},
 };
 
-// pub const WIN_SZ: u16 = u16::MAX;
-pub const WIN_SZ: u16 = 8;
+pub const WIN_SZ: u16 = u16::MAX;
+// pub const WIN_SZ: u16 = 8;
 pub const MSS: usize = 536; // TODO: RFC 1122, p. 86 says "MUST" default of 536
 pub const ALPHA: f64 = 0.85;
 pub const BETA: f64 = 1.5;

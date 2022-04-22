@@ -138,7 +138,10 @@ impl TCPModule {
      * Returns:
      * - socket number on success or negative number on failure
      */
-    pub fn v_listen(&self, addr: Ipv4Addr, port: u16) -> Result<SocketID> {
+    pub fn v_listen(&self, addr: Ipv4Addr, port: u16) -> TCPResult<SocketID> {
+        // enforce that port >= 1024
+        ensure!(port >= 1024, AddrInUseSnafu { addr, port });
+
         // check if addr valid, i.e. not used
         let src_sock = SocketAddrV4::new(addr, port);
         let zero_sock = SocketAddrV4::new(0.into(), 0);
@@ -146,12 +149,10 @@ impl TCPModule {
             src_sock,
             dst_sock: zero_sock,
         };
-        if self.sockets.has_entry(&sock_entry) {
-            return Err(Error::new(
-                ErrorKind::AddrInUse,
-                format!("[v_listen] socket {}:{} already in use!", addr, port),
-            ));
-        }
+        ensure!(
+            !self.sockets.has_entry(&sock_entry),
+            AddrInUseSnafu { addr, port }
+        );
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 

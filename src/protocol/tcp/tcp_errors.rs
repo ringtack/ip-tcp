@@ -1,6 +1,8 @@
 use super::tcp_socket::TCPState;
 use snafu::prelude::*;
 
+use std::net::Ipv4Addr;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum TCPError {
@@ -32,6 +34,9 @@ pub enum TCPError {
 
     #[snafu(display("{} not valid socket descriptor", sock_id))]
     BadFd { sock_id: u8 },
+
+    #[snafu(display("{}:{} already in use! (if port < 1024, reserved)", addr, port))]
+    AddrInUse { addr: Ipv4Addr, port: u16 },
 }
 
 pub type TCPResult<T, E = TCPError> = std::result::Result<T, E>;

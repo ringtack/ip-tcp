@@ -7,8 +7,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-// pub const BUFFER_SIZE: usize = u16::MAX as usize;
-pub const BUFFER_SIZE: usize = 16;
+pub const BUFFER_SIZE: usize = u16::MAX as usize;
+// pub const BUFFER_SIZE: usize = 16;
 
 /**
  * Control struct containing the send sequence space's variables.
@@ -138,7 +138,7 @@ impl SendControlBuffer {
         // update nxt
         self.nxt = (self.nxt + count as u32) % BUFFER_SIZE as u32;
 
-        println!("[SCB::get_nxt] {}", self);
+        // println!("[SCB::get_nxt] {}", self);
 
         Ok((seq_no, count))
     }
@@ -257,7 +257,7 @@ impl SendControlBuffer {
         self.head = (self.head + msg_len) % BUFFER_SIZE;
         self.len += msg_len;
 
-        println!("[SCB::write] {}", self);
+        // println!("[SCB::write] {}", self);
         // TODO: notify condition variable? or do within sock.send
 
         Ok(msg_len)
@@ -270,12 +270,13 @@ impl SendControlBuffer {
      * - isn: the chosen initial sequence number
      */
     pub fn set_iss(&mut self, iss: u32) {
-        self.iss = iss;
-        self.una = iss;
-        self.nxt = iss + 1;
+        let b_size = BUFFER_SIZE as u32;
+        self.iss = iss % b_size;
+        self.una = iss % b_size;
+        self.nxt = (iss + 1) % b_size;
 
-        self.head = (iss + 1) as usize;
-        self.tail = (iss + 1) as usize;
+        self.head = ((iss + 1) % b_size) as usize;
+        self.tail = ((iss + 1) % b_size) as usize;
         self.len = 1; // hacky solution to let set_una through
     }
 
@@ -485,7 +486,7 @@ impl RecvControlBuffer {
         self.wnd += count as u16;
         self.len -= count;
 
-        println!("[RCB::read] {}", self);
+        // println!("[RCB::read] {}", self);
 
         Ok(count)
     }
@@ -563,7 +564,7 @@ impl RecvControlBuffer {
         self.wnd -= msg_len as u16;
         self.len += msg_len;
 
-        println!("[RCB::write] {}", self);
+        // println!("[RCB::write] {}", self);
         // TODO: notify condition variable? or do within sock.send
 
         Ok(msg_len)
@@ -576,8 +577,9 @@ impl RecvControlBuffer {
      * - irs: the initial receive number (i.e. SEG.SEQ of SYN segment)
      */
     pub fn set_irs(&mut self, irs: u32) {
-        self.irs = irs;
-        self.nxt = irs + 1;
+        let b_size = BUFFER_SIZE as u32;
+        self.irs = irs % b_size;
+        self.nxt = (irs + 1) % b_size;
 
         self.len = 0;
         self.head = (irs + 1) as usize;
@@ -620,7 +622,7 @@ impl RecvControlBuffer {
      * - seg_len: the length of the segment
      *
      * From the RFC (note that 3rd and 4th conditions are flipped in implementation):
-     * Segment Receive  Test
+     *  Segment Receive  Test
      *  Length  Window
      *  ------- -------  -------------------------------------------
      *     0       0     SEG.SEQ = RCV.NXT

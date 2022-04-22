@@ -389,17 +389,17 @@ impl Node {
             "log" => {
                 if args.len() != 2 {
                     eprintln!("Usage: \"log <socket id>\"");
-                } else {
-                    let sid = match args[1].parse::<u8>() {
-                        Ok(id) => id,
-                        Err(e) => {
-                            eprintln!("{}", e);
-                            return;
-                        }
-                    };
-                    if let Err(e) = self.tcp_module.log_socket_buffers(sid) {
+                    return;
+                }
+                let sid = match args[1].parse::<u8>() {
+                    Ok(id) => id,
+                    Err(e) => {
                         eprintln!("{}", e);
+                        return;
                     }
+                };
+                if let Err(e) = self.tcp_module.log_socket_buffers(sid) {
+                    eprintln!("{}", e);
                 }
             }
             "" => println!(),
