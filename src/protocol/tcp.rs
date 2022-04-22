@@ -1,14 +1,17 @@
+pub mod control_buffers;
 pub mod socket_table;
 pub mod synchronized_queue;
+pub mod tcp_errors;
 pub mod tcp_segment;
 pub mod tcp_socket;
 pub mod tcp_utils;
 
 use dashmap::{iter::Iter, DashMap, DashSet};
 use etherparse::{Ipv4Header, TcpHeader};
-// use threadpool::ThreadPool;
+use snafu::prelude::*;
 
 use std::{
+    cmp::min,
     io::{Error, ErrorKind, Result},
     net::{Ipv4Addr, SocketAddrV4},
     sync::{
@@ -16,10 +19,14 @@ use std::{
         mpsc::{self, Receiver, Sender, SyncSender},
         Arc, Mutex, RwLock,
     },
-    thread::JoinHandle,
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
-use self::{socket_table::*, synchronized_queue::*, tcp_segment::*, tcp_socket::*, tcp_utils::*};
+use self::{
+    socket_table::*, synchronized_queue::*, tcp_errors::*, tcp_segment::*, tcp_socket::*,
+    tcp_utils::*,
+};
 use crate::protocol::network::{ip_packet::*, Handler, InternetModule};
 
 pub const TCP_PROTOCOL: u8 = 6;
@@ -218,14 +225,11 @@ impl TCPModule {
         // create socket ID and socket
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let sock = Socket::new(src_sock, dst_sock, TCPState::SynSent, self.send_tx.clone());
-        // set socket values
         let isn = 0; // TODO: better ISN selection
-        {
-            let mut snd = sock.snd.lock().unwrap();
-            snd.iss = isn;
-            snd.una = isn;
-            snd.nxt = isn + 1;
-        }
+                     // set socket values
+        let mut snd = sock.snd.lock().unwrap();
+        snd.set_iss(isn);
+        drop(snd);
 
         // send SYN segment
         if sock.send_syn(dst_sock, isn).is_ok() {}
@@ -237,6 +241,72 @@ impl TCPModule {
         self.sockets.insert_entry(id, sock_entry, sock);
 
         Ok(id)
+    }
+
+    /**
+     * Read on an open socket (RECEIVE in the RFC). REQUIRED to block when there is no available
+     * data. All reads should return at least one data byte unless failure or EOF occurs.
+     *
+     * Returns:
+     * - (num bytes read) or (negative number on failure) or (0 on EOF and shutdown_read) or (0 if
+     * nbyte = 0)
+     */
+    pub fn v_read(&self, id: SocketID, buf: &mut [u8], n_bytes: usize) -> TCPResult<usize> {
+        if n_bytes == 0 {
+            return Ok(0);
+        }
+
+        // attempt to find socket associated with ID
+        let sock = self
+            .sockets
+            .get_socket_by_id(id)
+            .context(BadFdSnafu { sock_id: id })?;
+
+        // TODO: error handling
+        let mut n_read = sock.recv_buffer(buf, n_bytes)?;
+        while n_read == 0 {
+            thread::sleep(Duration::from_millis(100));
+            n_read = sock.recv_buffer(buf, n_bytes).unwrap();
+        }
+
+        Ok(n_read)
+    }
+
+    /**
+     * Write on an open socket (SEND in the RFC). Write is REQUIRED to block until all bytes are in
+     * the send buffer.
+     *
+     * Returns:
+     * - (num bytes written) or (negative number on failure)
+     */
+    pub fn v_write(&self, id: SocketID, buf: &[u8]) -> TCPResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let n_bytes = buf.len();
+
+        // attempt to find socket associated with ID
+        let sock = self
+            .sockets
+            .get_socket_by_id(id)
+            .context(BadFdSnafu { sock_id: id })?;
+
+        let mut n_wrote = 0;
+        // TODO: error handling
+        while n_wrote < n_bytes {
+            let n_to_write = min(n_bytes - n_wrote, sock.get_space_left());
+            n_wrote += match sock.send_buffer(&buf[n_wrote..(n_wrote + n_to_write)]) {
+                Ok(n_written) => n_written,
+                Err(e) => {
+                    eprintln!("[v_write] {}", e);
+                    thread::sleep(Duration::from_millis(100));
+                    0
+                }
+            }
+        }
+
+        Ok(n_wrote)
     }
 
     /**
@@ -286,5 +356,18 @@ impl TCPModule {
         }
 
         res
+    }
+
+    // TODO: REMOVE, JUST FOR LOGGING
+    pub fn log_socket_buffers(&self, id: SocketID) -> TCPResult<()> {
+        // attempt to find socket associated with ID
+        let sock = self
+            .sockets
+            .get_socket_by_id(id)
+            .context(BadFdSnafu { sock_id: id })?;
+
+        let (snd, rcv) = (sock.snd.lock().unwrap(), sock.rcv.lock().unwrap());
+        println!("{}\n{}", snd, rcv);
+        Ok(())
     }
 }

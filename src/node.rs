@@ -260,6 +260,80 @@ impl Node {
                     }
                 }
             }
+            "s" => {
+                if args.len() < 3 {
+                    eprintln!("Usage: \"s <socket id> <data...>\"");
+                } else {
+                    let data = args[2..].to_vec().join(" ");
+                    match args[1].parse::<u8>() {
+                        Ok(sid) => match self.tcp_module.v_write(sid, data.as_bytes()) {
+                            Ok(n) => {
+                                let (src_sock, dst_sock) =
+                                    self.tcp_module.get_sock_entry(sid).unwrap();
+                                println!(
+                                    "[{}] Put {} bytes on send buffer to {}.",
+                                    src_sock, n, dst_sock
+                                );
+                            }
+                            Err(e) => eprintln!("{}", e),
+                        },
+                        Err(e) => eprintln!("{}", e),
+                    }
+                }
+            }
+            "r" => {
+                if args.len() < 3 || args.len() > 4 {
+                    eprintln!("Usage: \"r <socket id> <n_bytes> <y|n>\"");
+                } else {
+                    let block = if args.len() != 4 {
+                        false
+                    } else {
+                        match args[3] {
+                            "y" => true,
+                            "n" => false,
+                            _ => {
+                                eprintln!("last argument must be y|n");
+                                return;
+                            }
+                        }
+                    };
+                    let n_bytes = match args[2].parse::<usize>() {
+                        Ok(n) => n,
+                        Err(e) => {
+                            eprintln!("{}", e);
+                            return;
+                        }
+                    };
+                    let mut buf = vec![0; n_bytes];
+                    let mut n_read = 0;
+
+                    match args[1].parse::<u8>() {
+                        Ok(sid) => {
+                            while n_read < n_bytes {
+                                let n_to_read = n_bytes - n_read;
+                                n_read += match self.tcp_module.v_read(
+                                    sid,
+                                    &mut buf[n_read..(n_read + n_to_read)],
+                                    n_to_read,
+                                ) {
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        eprintln!("{}", e);
+                                        return;
+                                    }
+                                };
+                                if !block {
+                                    break;
+                                }
+                            }
+                            let data = String::from_utf8_lossy(&buf).into_owned();
+                            let (src_sock, dst_sock) = self.tcp_module.get_sock_entry(sid).unwrap();
+                            println!("[{}] Read from {}: \'{}\'", src_sock, dst_sock, data);
+                        }
+                        Err(e) => eprintln!("{}", e),
+                    }
+                }
+            }
             "down" => {
                 if args.len() != 2 {
                     eprintln!("Usage: \"down <id>\"");
@@ -310,6 +384,23 @@ impl Node {
             "quit" | "q" => {
                 self.quit();
                 process::exit(0);
+            }
+            // TODO: REMOVE, JUST FOR LOGGING
+            "log" => {
+                if args.len() != 2 {
+                    eprintln!("Usage: \"log <socket id>\"");
+                } else {
+                    let sid = match args[1].parse::<u8>() {
+                        Ok(id) => id,
+                        Err(e) => {
+                            eprintln!("{}", e);
+                            return;
+                        }
+                    };
+                    if let Err(e) = self.tcp_module.log_socket_buffers(sid) {
+                        eprintln!("{}", e);
+                    }
+                }
             }
             "" => println!(),
             _ => eprintln!("Error: command not found. Help menu:\n{}", HELP_MSG),
@@ -371,6 +462,10 @@ const HELP_MSG: &str = " help (h)        : Print this list of commands
  sockets (ls)    : Print information about each socket (ID, IP, Port, State)
  a [port]        : Spawn a socket, bind it to the given port, and start accepting connections on that port.
  c [ip] [port]   : Attempt to connect to the given ip address, in dot notation, on the given port.
+
+ s [sid] [data]  : Send a string to a socket. Blocks until v_write() returns.
+ r [sid] [n_bytes] [y|n]: Try to read data from a socket. If last argument \"y\", blocks until n_bytes are
+                          read or connection closes. If \"n\" (default), returns whenever v_read() returns.
 
  send [ip] [protocol] [payload] : sends payload with protocol=protocol to virtual-ip ip
  up [integer]   : Bring an interface \"up\" (it must be an existing interface, probably one you brought down)

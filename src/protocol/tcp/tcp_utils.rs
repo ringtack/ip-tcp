@@ -10,8 +10,6 @@ use crate::protocol::{
 // pub const N_THREADS: usize = 4;
 pub const CHAN_BOUND: usize = 1024; // TODO: find better bound
 
-pub const WIN_SZ: u16 = u16::MAX;
-
 pub fn make_send_loop(
     send_rx: Receiver<IPPacket>, // TODO: other parameters
     ip_module: InternetModule,
@@ -29,10 +27,24 @@ pub fn make_send_loop(
     })
 }
 
+/**
+ * Handles accepting incoming connections to a listener socket.
+ *
+ * Inputs:
+ * - accept_rx: receiver of incoming SYN segments.
+ * - send_tx: sender for the TCP Module (i.e., where outgoing segments should be sent)
+ * - sockets: copy of socket table (Arc not needed, since everything within is synchronized)
+ * - pending_socks: set of all sockets with pending operations (i.e., waiting ACKs)
+ * - listen_queue: map from listener sockets to a queue of sockets to be accepted
+ * - next_id: synchronized counter for the next socket ID
+ *
+ * Returns:
+ * - handle to which to join (for cleanup)
+ */
 pub fn make_accept_loop(
     accept_rx: Receiver<IPPacket>,
     send_tx: SyncSender<IPPacket>,
-    socket_table: SocketTable,
+    sockets: SocketTable,
     pending_socks: Arc<DashSet<SocketEntry>>,
     listen_queue: Arc<DashMap<SocketEntry, SynchronizedQueue<SocketID>>>,
     next_id: Arc<AtomicU8>,
@@ -68,12 +80,12 @@ pub fn make_accept_loop(
 
             // println!("[accept_loop] requested sock entry: {:#?}", sock_entry);
             // check that socket entry for listener exists
-            let socket = match socket_table.get_socket_by_entry(&sock_entry) {
+            let socket = match sockets.get_socket_by_entry(&sock_entry) {
                 Some(socket) => socket,
                 // if socket entry doesn't exist, check if 0.0.0.0:PORT exists
                 None => {
                     sock_entry.src_sock = SocketAddrV4::new(0.into(), sock_entry.src_sock.port());
-                    match socket_table.get_socket_by_entry(&sock_entry) {
+                    match sockets.get_socket_by_entry(&sock_entry) {
                         Some(socket) => socket,
                         None => continue,
                     }
@@ -108,16 +120,14 @@ pub fn make_accept_loop(
             let seq = syn_seg.header.sequence_number;
             // update socket's values:
             let (mut snd, mut rcv) = (new_sock.snd.lock().unwrap(), new_sock.rcv.lock().unwrap());
-            rcv.nxt = seq + 1;
-            rcv.irs = seq;
-            snd.nxt = iss + 1;
-            snd.una = iss;
+            snd.set_iss(iss);
+            rcv.set_irs(seq);
 
             // get new socket entry and ID, and increment ID
             let new_sock_entry = SocketEntry { src_sock, dst_sock };
             let new_id = next_id.fetch_add(1, Ordering::Relaxed);
             // insert into socket table
-            socket_table.insert_entry(new_id, new_sock_entry.clone(), new_sock.clone());
+            sockets.insert_entry(new_id, new_sock_entry.clone(), new_sock.clone());
 
             // insert into pending sockets
             pending_socks.insert(new_sock_entry);
@@ -133,13 +143,24 @@ pub fn make_accept_loop(
             }
 
             // send SYN+ACK
-            if new_sock.send_syn_ack(snd.iss, rcv.nxt).is_ok() {}
+            if new_sock.send_syn_ack(snd.iss, rcv.nxt, rcv.wnd).is_ok() {}
         }
 
         eprintln!("accept loop terminated.");
     })
 }
 
+/**
+ * Handles incoming segments of all kinds! (i.e., everything except accepting/closing connections).
+ *
+ * Inputs:
+ * - segment_rx: receiver of incoming segments.
+ * - sockets: copy of socket table
+ * - pending_socks: set of all sockets with pending operation
+ *
+ * Returns:
+ * - handle to which to join (for cleanup)
+ */
 pub fn make_segment_loop(
     segment_rx: Receiver<IPPacket>,
     sockets: SocketTable,
@@ -161,6 +182,7 @@ pub fn make_segment_loop(
             let seq_no = tcp_seg.header.sequence_number;
             let ack = tcp_seg.header.ack;
             let ack_no = tcp_seg.header.acknowledgment_number;
+            let seg_wnd = tcp_seg.header.window_size;
             let seg_len = tcp_seg.data.len() as u32;
 
             // get socket entry of destination's socket
@@ -179,24 +201,14 @@ pub fn make_segment_loop(
                 }
 
                 // update send/receive sequence values
-                rcv.nxt = seq_no + 1;
-                rcv.irs = seq_no;
+                rcv.set_irs(seq_no);
                 if ack {
-                    snd.una = ack_no;
+                    snd.set_una(seq_no, ack_no, seg_wnd);
                 }
                 // TODO: remove relevant sections on retransmission queue
 
-                // if synchronous SYN, set to SYN-RECEIVED and send SYN-ACK back
-                if snd.una == snd.iss {
-                    // insert into pending sockets; we're waiting for an ACK
-                    pending_socks.insert(sock_entry.clone());
-                    *tcp_state = TCPState::SynRcvd;
-
-                    print!("!!!SYNC!!! ");
-                    // send SYN+ACK back
-                    if sock.send_syn_ack(snd.una, rcv.nxt).is_ok() {}
-                } else {
-                    // otherwise, we've received SYN+ACK, so send SYN back and mark established
+                // If we've received SYN+ACK, so send SYN back and mark established
+                if ack {
                     println!(
                         "[{}] received SYN+ACK! establishing connection to {}.",
                         sock.src_sock, sock.dst_sock
@@ -206,30 +218,27 @@ pub fn make_segment_loop(
                     *tcp_state = TCPState::Established;
 
                     // send ACK back
-                    if sock.send_ack(snd.nxt, rcv.nxt).is_ok() {}
+                    if sock.send_ack(snd.nxt, rcv.nxt, rcv.wnd).is_ok() {}
+                    // otherwise (simultaneous SYN), set to SYN-RECEIVED and send SYN-ACK back
+                } else {
+                    // insert into pending sockets; we're waiting for an ACK
+                    pending_socks.insert(sock_entry.clone());
+                    *tcp_state = TCPState::SynRcvd;
+
+                    print!("!!!SYNC!!! ");
+                    // send SYN+ACK back
+                    if sock.send_syn_ack(snd.una, rcv.nxt, rcv.wnd).is_ok() {}
                 }
 
                 // [NB: I structured it like this to prevent giga indents]
                 continue;
             }
 
-            //// for all other states, check acceptability of segment:
-            // - if rcv window = 0 and not an initial SYN
-            // - if rcv window > 0 and SYN not in window
-            // - if rcv window = 0 and has data
-            // - if rcv window > 0 and neither start nor end in window
-            if (seg_len == 0 && rcv.wnd == 0 && seq_no != rcv.nxt)
-                || (seg_len == 0 && rcv.wnd > 0 && !in_rcv_window(&sock, seq_no))
-                || (seg_len > 0 && rcv.wnd == 0)
-                || (seg_len > 0
-                    && rcv.wnd > 0
-                    && !in_rcv_window(&sock, seq_no)
-                    && !in_rcv_window(&sock, seq_no + seg_len))
-            {
+            // check acceptability of segment
+            if !rcv.acceptable_seg(seq_no, seg_len) {
                 eprintln!("[segment_loop] unacceptable segment; dropping...");
-
                 // if any of those conditions fail, then not acceptable, so send ACK back
-                if sock.send_ack(snd.nxt, rcv.nxt).is_ok() {}
+                if sock.send_ack(snd.nxt, rcv.nxt, rcv.wnd).is_ok() {}
                 // drop packet
                 continue;
             }
@@ -237,7 +246,7 @@ pub fn make_segment_loop(
             // if SYN packet:
             if syn {
                 // if packet in window, error, so drop
-                if in_rcv_window(&sock, seq_no) {
+                if rcv.in_window(seq_no) {
                     eprintln!("[segment_loop] SYN in RCV window illegal, dropping...");
 
                     // TODO: cleanup:
@@ -255,7 +264,10 @@ pub fn make_segment_loop(
             // if in SYN_RCVD state...
             if *tcp_state == TCPState::SynRcvd {
                 // and ACK in SND window, move to ESTABLISHED
-                if snd.una <= ack_no && ack_no <= snd.nxt {
+                if snd.in_una_window(ack_no) {
+                    // update UNA & co. values
+                    snd.set_una(seq_no, ack_no, seg_wnd);
+
                     println!(
                         "[{}] Established connection to {}",
                         sock.src_sock, sock.dst_sock
@@ -266,9 +278,28 @@ pub fn make_segment_loop(
                     pending_socks.remove(&sock_entry);
 
                     // TODO: additional processing of data
+                    // ...
                 } // else { drop } -> if outside window, drop segment
             } else if *tcp_state == TCPState::Established {
-                // processing...
+                let old_una = snd.una;
+                // if ACK in [SND.UNA ... SND.UNA + SND.NXT], update send window
+                if snd.in_una_window(ack_no) {
+                    snd.wnd = seg_wnd;
+                }
+
+                // if ACK in (SND.UNA ... SND.UNA + SND.NXT], update send variables
+                if ack_no != old_una && snd.in_una_window(ack_no) {
+                    snd.set_una(seq_no, ack_no, seg_wnd);
+                }
+
+                // if has data:
+                if !tcp_seg.data.is_empty() {
+                    // fill up receive buffer [TODO: error handle]
+                    if let Err(e) = rcv.write(tcp_seg.data.as_slice(), seq_no) {
+                        eprintln!("[segment_loop] {}", e);
+                    } else if sock.send_ack(snd.nxt, rcv.nxt, rcv.wnd).is_ok() {
+                    }
+                }
             }
         }
 
@@ -277,7 +308,26 @@ pub fn make_segment_loop(
 }
 
 /**
+ * Handles shutdown requests.
+ */
+pub fn make_shutdown_handler() -> thread::JoinHandle<()> {
+    // TODO: handle shutdowns
+    thread::spawn(|| {
+        //
+    })
+}
+
+/**
  * Construct TCP handler.
+ *
+ * Inputs:
+ * - sockets: copy of socket table
+ * - pending_socks: set of all sockets with pending operation
+ * - accept_tx: Sender for the accept_loop
+ * - segment_tx: Sender for the segment_loop
+ *
+ * Returns:
+ * - handler!
  */
 pub fn make_tcp_handler(
     sockets: SocketTable,
@@ -335,6 +385,7 @@ pub fn make_tcp_handler(
         //// Forward, based on TCP State:
         let syn = tcp_seg.header.syn;
         let ack = tcp_seg.header.ack;
+        let fin = tcp_seg.header.fin;
 
         let tcp_state = sock.tcp_state.lock().unwrap();
         let (snd, _) = (sock.snd.lock().unwrap(), sock.rcv.lock().unwrap());
@@ -353,8 +404,10 @@ pub fn make_tcp_handler(
             let ackno = tcp_seg.header.acknowledgment_number;
             // ensure that ACKNO is in correct spot; if so, send to segment_loop
             if snd.una <= ackno && ackno <= snd.nxt && segment_tx.send(packet).is_ok() {}
+            // if Established, should be able to receive segments
         } else if *tcp_state == TCPState::Established {
             // other stuff TODO: like whatttt
+            if segment_tx.send(packet).is_ok() {}
         }
 
         Ok(())
@@ -429,9 +482,4 @@ pub fn find_sock_entry(sock_entry: &SocketEntry, st: &SocketTable) -> Option<Soc
             }
         }
     }
-}
-
-pub fn in_rcv_window(sock: &Socket, seq_no: u32) -> bool {
-    let rcv = sock.rcv.lock().unwrap();
-    rcv.nxt <= seq_no && seq_no < rcv.nxt + rcv.wnd as u32
 }

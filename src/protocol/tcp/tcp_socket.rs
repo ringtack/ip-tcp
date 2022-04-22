@@ -1,19 +1,26 @@
 // use concurrent_queue::ConcurrentQueue;
-use rb::{Consumer, Producer, SpscRb};
+// use rb::{Consumer, Producer, SpscRb};
+use snafu::ensure;
 
-use std::fmt;
-
-use crate::protocol::{
-    link::MTU,
-    network::ip_packet::*,
-    tcp::{synchronized_queue::*, *},
+use std::{
+    cmp::{max, min},
+    fmt,
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
 };
 
-pub const BUF_SIZE: u16 = u16::MAX;
-// -20 for size of TCP Header without options
-pub const MSS: usize = MTU - 20;
+use crate::protocol::{
+    network::ip_packet::*,
+    tcp::{control_buffers::*, tcp_errors::*, *},
+};
 
-#[derive(Clone, PartialEq, Eq)]
+// pub const WIN_SZ: u16 = u16::MAX;
+pub const WIN_SZ: u16 = 8;
+pub const MSS: usize = 536; // TODO: RFC 1122, p. 86 says "MUST" default of 536
+pub const ALPHA: f64 = 0.85;
+pub const BETA: f64 = 1.5;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TCPState {
     Listen,
     SynSent,
@@ -54,18 +61,15 @@ pub struct Socket {
     pub dst_sock: SocketAddrV4,
     pub tcp_state: Arc<Mutex<TCPState>>,
 
-    // Send/Receive Control Variables
-    pub seg: Arc<Mutex<SegmentVariables>>,
-    pub snd: Arc<Mutex<SendSequence>>,
-    pub rcv: Arc<Mutex<RecvSequence>>,
+    // timeout/retransmission information
+    pub timer: Arc<Mutex<Instant>>,
+    pub srtt: Arc<Mutex<Duration>>,
 
-    // Send/Receive Buffers/Channels
+    // Send/Receive Control Structs
+    pub snd: Arc<Mutex<SendControlBuffer>>,
+    pub rcv: Arc<Mutex<RecvControlBuffer>>,
     send_tx: SyncSender<IPPacket>,
-
-    send_rb: Arc<SpscRb<u8>>,
-    recv_rb: Arc<SpscRb<u8>>,
-    // retransmit_queue: SynchronizedQueue<TCPSegment>,
-    // current_segment (TODO: what needs to be represented?)
+    nagles: Arc<AtomicBool>,
 }
 
 impl Socket {
@@ -79,21 +83,110 @@ impl Socket {
             src_sock,
             dst_sock,
             tcp_state: Arc::new(Mutex::new(tcp_state)),
-            seg: Arc::new(Mutex::new(SegmentVariables::new())),
-            snd: Arc::new(Mutex::new(SendSequence::new())),
-            rcv: Arc::new(Mutex::new(RecvSequence::new())),
+            timer: Arc::new(Mutex::new(Instant::now())),
+            srtt: Arc::new(Mutex::new(Duration::ZERO)),
+            //
+            snd: Arc::new(Mutex::new(SendControlBuffer::new())),
+            rcv: Arc::new(Mutex::new(RecvControlBuffer::new())),
             send_tx,
-            //.
-            send_rb: Arc::new(SpscRb::new(BUF_SIZE as usize)),
-            recv_rb: Arc::new(SpscRb::new(BUF_SIZE as usize)),
+            nagles: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /**
+     * Receives data from the other end of the connection.
+     */
+    pub fn recv_buffer(&self, buf: &mut [u8], n_bytes: usize) -> TCPResult<usize> {
+        // if invalid state, immediately return [TODO: add more states]
+        let tcp_state = self.get_tcp_state();
+        ensure!(
+            tcp_state == TCPState::Established,
+            InvalidStateSnafu {
+                tcp_state,
+                command: String::from("RECV"),
+            }
+        );
+
+        let mut rcv = self.rcv.lock().unwrap();
+
+        // return number of bytes read
+        rcv.read(buf, n_bytes)
+    }
+
+    /**
+     * Sends a created segment to other end of the connection.
+     */
+    pub fn send_buffer(&self, buf: &[u8]) -> TCPResult<usize> {
+        // if invalid state, immediately return
+        let tcp_state = self.get_tcp_state();
+        ensure!(
+            tcp_state == TCPState::Established,
+            InvalidStateSnafu {
+                tcp_state,
+                command: String::from("SEND"),
+            }
+        );
+
+        let mut snd = self.snd.lock().unwrap();
+        let old_len = snd.len();
+
+        // attempt to write to circular buffer
+        snd.write(buf)?;
+
+        // if Nagle's algorithm is enabled, follow algorithm
+        // Reference: RFC 1122, p. 98-99
+        if self.nagles.load(Ordering::Relaxed) {
+            // if:
+            // - amount of data in queue >= MSS
+            // - there was no unconfirmed data, automatically send
+            if snd.len() >= MSS || old_len == 0 {
+                let segments = snd.get_una_segments(MSS)?;
+                self.send_segments(segments).unwrap();
+            } // else { // otherwise, just buffer, which we've already done with snd.write }
+        } else {
+            // if no Nagle's, just send immediately
+            let segments = snd.get_una_segments(MSS)?;
+            self.send_segments(segments).unwrap();
+        }
+
+        Ok(buf.len())
+    }
+
+    /**
+     * Sends all un-ACK'd data up until the window.
+     */
+    pub fn send_segments(&self, segments: Vec<(u32, Vec<u8>)>) -> Result<()> {
+        // for each segment, create TCP segment/IP packet
+        for (seg_seq, seg_data) in segments {
+            let (ack, win_sz) = RecvControlBuffer::get_rcv_ack(self.rcv.clone());
+            let segment =
+                TCPSegment::new(self.src_sock, self.dst_sock, seg_seq, ack, win_sz, seg_data);
+            let packet = IPPacket::new(
+                *self.src_sock.ip(),
+                *self.dst_sock.ip(),
+                segment.to_bytes()?,
+                TCP_TTL,
+                TCP_PROTOCOL,
+            );
+
+            // and send to other!
+            if self.send_tx.send(packet).is_ok() {}
+        }
+        Ok(())
+    }
+
+    /**
+     * Gets the amount of space left in the send buffer.
+     */
+    pub fn get_space_left(&self) -> usize {
+        self.snd.lock().unwrap().space_left()
     }
 
     /**
      * Sends a SYN segment to the destination.
      */
     pub fn send_syn(&self, dst_sock: SocketAddrV4, iss: u32) -> Result<()> {
-        println!("[{}] sending SYN to {}...", self.src_sock, self.dst_sock);
+        println!("[{}] sending SYN to {}...", self.src_sock, dst_sock);
 
         // create TCP segment/IP packet
         let segment = TCPSegment::new_syn(self.src_sock, dst_sock, iss);
@@ -113,7 +206,7 @@ impl Socket {
     /**
      * Sends a SYN+ACK segment to other end of connection.
      */
-    pub fn send_syn_ack(&self, snd_iss: u32, rcv_nxt: u32) -> Result<()> {
+    pub fn send_syn_ack(&self, snd_iss: u32, rcv_nxt: u32, win_sz: u16) -> Result<()> {
         println!(
             "[{}] sending SYN+ACK to {}...",
             self.src_sock, self.dst_sock
@@ -121,7 +214,7 @@ impl Socket {
 
         // create TCP segment/IP packet
         let segment =
-            TCPSegment::new_syn_ack(self.src_sock, self.dst_sock, snd_iss, rcv_nxt, WIN_SZ);
+            TCPSegment::new_syn_ack(self.src_sock, self.dst_sock, snd_iss, rcv_nxt, win_sz);
         let packet = IPPacket::new(
             *self.src_sock.ip(),
             *self.dst_sock.ip(),
@@ -138,7 +231,7 @@ impl Socket {
     /**
      * Sends an ACK segment to other end of connection. [TODO: piggyback off data, if possible]
      */
-    pub fn send_ack(&self, snd_nxt: u32, rcv_nxt: u32) -> Result<()> {
+    pub fn send_ack(&self, snd_nxt: u32, rcv_nxt: u32, win_sz: u16) -> Result<()> {
         println!("[{}] sending ACK to {}...", self.src_sock, self.dst_sock);
         // create TCP segment/IP packet
         let segment = TCPSegment::new(
@@ -146,7 +239,7 @@ impl Socket {
             self.dst_sock,
             snd_nxt,
             rcv_nxt,
-            WIN_SZ,
+            win_sz,
             Vec::new(),
         );
         // create IP packet
@@ -162,125 +255,50 @@ impl Socket {
         if self.send_tx.send(packet).is_ok() {}
         Ok(())
     }
-}
 
-/**
- * Struct containing the current segment variables.
- *
- * Fields:
- * - SEQ: segment sequence number (SEQ of first byte)
- * - ACK: acknowledgment number from receiver (i.e. next SEQ expected)
- * - LEN: segment length (including SYN/FIN)
- * - WND: receiver's window (TODO: why need here?)
- * - UP: segment's urgent pointer (UNUSED)
- * - PRC: segment's precedence (UNUSED)
- */
-#[derive(Clone)]
-pub struct SegmentVariables {
-    pub seq: u32,
-    pub ack: u32,
-    pub len: u16,
-    pub wnd: u16,
-    pub up: u16,
-    pub prc: u16,
-}
-
-impl SegmentVariables {
-    pub fn new() -> SegmentVariables {
-        SegmentVariables {
-            seq: 0,
-            ack: 0,
-            len: 0,
-            wnd: 0,
-            up: 0,
-            prc: 0,
-        }
+    /**
+     * Gets the current timer value.
+     */
+    pub fn get_timeout(&self) -> Instant {
+        *self.timer.lock().unwrap()
     }
-}
 
-/**
- * Struct containing the send sequence space's variables.
- *
- * Fields:
- * - UNA: the first unacknowledged byte in the send sequence
- * - NXT: the next byte to be sent
- * - WND: the window size allowed to be sent
- * - UP: the urgent pointer (UNUSED)
- * - WL1: segment sequence number for the last window update (TODO: what is this?)
- * - WL2: segment acknowledgment number used for the last window update (TODO: ^)
- * - ISS: initial send sequence number (ISN)
- *
- * Send Sequence Space Diagram:
- *                 1         2          3          4
- *            ----------|----------|----------|----------
- *                   SND.UNA    SND.NXT    SND.UNA
- *                                        +SND.WND
- *
- *      1 - old sequence numbers which have been acknowledged
- *      2 - sequence numbers of unacknowledged data
- *      3 - sequence numbers allowed for new data transmission
- *      4 - future sequence numbers which are not yet allowed
- */
-#[derive(Clone)]
-pub struct SendSequence {
-    pub una: u32,
-    pub nxt: u32,
-    pub wnd: u16,
-    pub up: u16,
-    pub wl1: u32,
-    pub wl2: u32,
-    pub iss: u32,
-}
-
-impl SendSequence {
-    pub fn new() -> SendSequence {
-        SendSequence {
-            una: 0,
-            nxt: 0,
-            wnd: 0,
-            up: 0,
-            wl1: 0,
-            wl2: 0,
-            iss: 0,
-        }
+    /**
+     * Sets the current timer value.
+     */
+    pub fn set_timeout(&self, timer: Instant) {
+        *self.timer.lock().unwrap() = timer;
     }
-}
 
-/**
- * Struct containing the receive sequence space's variables.
- *
- * Fields:
- * - NXT: the next byte (sequence number) to receive
- * - WND: the window size allowed to be received
- * - UP: the urgent pointer (UNUSED)
- * - IRS: initial receive sequence number
- *
- * Receive Sequence Space Diagram:
- *
- *                      1          2          3
- *                 ----------|----------|----------
- *                        RCV.NXT    RCV.NXT
- *                                  +RCV.WND
- *
- *      1 - old sequence numbers which have been acknowledged
- *      2 - sequence numbers allowed for new reception
- *      3 - future sequence numbers which are not yet allowed
- */
-#[derive(Clone)]
-pub struct RecvSequence {
-    pub nxt: u32,
-    pub wnd: u16,
-    pub up: u16,
-    pub irs: u32,
-}
+    /**
+     * Updates the SRTT given a new RTT.
+     *
+     * Inputs:
+     * - rtt: the computed RTT from sending data to receiving the ACK for that segment (not
+     * necessarily all of it!)
+     */
+    pub fn update_srtt(&mut self, rtt: Duration) {
+        let mut srtt = self.srtt.lock().unwrap();
+        *srtt = srtt.mul_f64(ALPHA) + rtt.mul_f64(1.0 - ALPHA);
+    }
 
-impl RecvSequence {
-    pub fn new() -> RecvSequence {
-        RecvSequence {
-            nxt: 0,
-            wnd: 0,
-            up: 0,
-            irs: 0,
-        }
+    /**
+     * Computes the RTO of the socket, from the SRTT.
+     *
+     * Returns:
+     * - the computed re-transmission timeout
+     */
+    pub fn get_rto(&self) -> Duration {
+        // because constant Durations are nightly only...
+        let (lbound, ubound) = (Duration::from_millis(1), Duration::from_millis(100));
+        let srtt = self.srtt.lock().unwrap();
+        min(ubound, max(lbound, srtt.mul_f64(BETA)))
+    }
+
+    /**
+     * Gets the current state of the TCP socket.
+     */
+    pub fn get_tcp_state(&self) -> TCPState {
+        self.tcp_state.lock().unwrap().clone()
     }
 }
