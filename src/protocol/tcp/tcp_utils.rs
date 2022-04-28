@@ -184,6 +184,7 @@ pub fn make_segment_loop(
             let ack_no = tcp_seg.header.acknowledgment_number;
             let seg_wnd = tcp_seg.header.window_size;
             let seg_len = tcp_seg.data.len() as u32;
+            let fin = tcp_seg.header.fin;
 
             // get socket entry of destination's socket
             let sock_entry = get_socket_entry_in(&ip_hdr, &tcp_seg.header);
@@ -263,8 +264,11 @@ pub fn make_segment_loop(
 
             // if in SYN_RCVD state...
             if *tcp_state == TCPState::SynRcvd {
-                // and ACK in SND window, move to ESTABLISHED
-                if snd.in_una_window(ack_no) {
+                // and FIN, move to CloseWait
+                if fin {
+                    *tcp_state = TCPState::CloseWait;
+                // otherwise, if ACK in SND window, move to ESTABLISHED
+                } else if snd.in_una_nxt_window(ack_no) {
                     // update UNA & co. values
                     snd.set_una(seq_no, ack_no, seg_wnd);
 
@@ -280,15 +284,28 @@ pub fn make_segment_loop(
                     // TODO: additional processing of data
                     // ...
                 } // else { drop } -> if outside window, drop segment
-            } else if *tcp_state == TCPState::Established {
+            } else {
+                // if in last ACK, delete da boi
+                if snd.nxt == ack_no && *tcp_state == TCPState::LastAck {
+                    // remove from pending sockets; we've been noticed senpai uWu~
+                    pending_socks.remove(&sock_entry);
+                    // TODO: other cleanup
+                    sockets.delete_socket_by_entry(&sock_entry);
+                }
+
+                let r_closed = sock.r_closed();
                 let old_una = snd.una;
-                // if ACK in [SND.UNA ... SND.UNA + SND.NXT], update send window
-                if snd.in_una_window(ack_no) {
+                // if ACK in [SND.UNA ... SND.UNA + SND.NXT] and not r_closed, update send window
+                if snd.in_una_nxt_window(ack_no) && !r_closed {
                     snd.wnd = seg_wnd;
                 }
 
                 // if ACK in (SND.UNA ... SND.UNA + SND.NXT], update send variables
-                if ack_no != old_una && snd.in_una_window(ack_no) {
+                if ack_no != old_una && snd.in_una_nxt_window(ack_no) && !r_closed {
+                    // hacky solution: if in closing state, artificially increase LEN
+                    if tcp_state.closing() {
+                        snd.len += 1;
+                    }
                     snd.set_una(seq_no, ack_no, seg_wnd);
                 }
 
@@ -299,28 +316,76 @@ pub fn make_segment_loop(
                 // pending_socks.insert(sock_entry);
                 // }
 
-                // if has data:
-                if !tcp_seg.data.is_empty() {
+                println!(
+                    "[segment_loop] # data: {}, ack: {}",
+                    tcp_seg.data.len(),
+                    ack_no
+                );
+
+                // if not fin/still can read and has data:
+                if (!fin || tcp_state.readable()) && !tcp_seg.data.is_empty() {
                     // fill up receive buffer [TODO: error handle]
                     if let Err(e) = rcv.write(tcp_seg.data.as_slice(), seq_no) {
                         eprintln!("[segment_loop] {}", e);
-                    } else if sock.send_ack(snd.nxt, rcv.nxt, rcv.wnd).is_ok() {
                     }
                 }
+
+                // if fin, update rcv.nxt
+                if fin {
+                    let nxt = rcv.nxt + 1;
+                    rcv.set_nxt(nxt);
+                }
+
+                // before we update, record if we should send an ack back
+                let should_send_ack =
+                    (fin && tcp_state.should_send_ack()) || !tcp_seg.data.is_empty();
+
+                // TODO: retransmission queue shenanigans
+                match *tcp_state {
+                    TCPState::Established => {
+                        if fin {
+                            *tcp_state = TCPState::CloseWait;
+                        }
+                    }
+                    // if in FinWait1, move to TimeWait, FinWait2, or Closing depending on value
+                    TCPState::FinWait1 => {
+                        if fin && snd.nxt == ack_no {
+                            *tcp_state = TCPState::TimeWait
+                            // TODO: timers ^ v
+                        } else if snd.nxt == ack_no {
+                            *tcp_state = TCPState::FinWait2
+                        } else if fin {
+                            *tcp_state = TCPState::Closing
+                        } else {
+                            println!(
+                                "[segment_loop] SND.NXT != ACK_NO and not FIN for {}",
+                                tcp_state
+                            );
+                        }
+                    }
+                    TCPState::FinWait2 => {
+                        if fin {
+                            *tcp_state = TCPState::TimeWait;
+                        }
+                    }
+                    // if in Closing, move to TimeWait
+                    TCPState::Closing => {
+                        // only update if ACKed our fin
+                        if snd.nxt == ack_no {
+                            *tcp_state = TCPState::TimeWait
+                        } else {
+                            println!("[segment_loop] SND.NXT != ACK_NO for Closing");
+                        }
+                    }
+                    _ => (),
+                };
+
+                // send ack back, if applicable
+                if should_send_ack && sock.send_ack(snd.nxt, rcv.nxt, rcv.wnd).is_ok() {}
             }
         }
 
         eprintln!("segment loop terminated.");
-    })
-}
-
-/**
- * Handles shutdown requests.
- */
-pub fn make_shutdown_handler() -> thread::JoinHandle<()> {
-    // TODO: handle shutdowns
-    thread::spawn(|| {
-        //
     })
 }
 
@@ -401,7 +466,6 @@ pub fn make_tcp_handler(
         //// Forward, based on TCP State:
         let syn = tcp_seg.header.syn;
         let ack = tcp_seg.header.ack;
-        let fin = tcp_seg.header.fin;
 
         let tcp_state = sock.tcp_state.lock().unwrap();
         let (snd, _) = (sock.snd.lock().unwrap(), sock.rcv.lock().unwrap());
@@ -421,7 +485,7 @@ pub fn make_tcp_handler(
             // ensure that ACKNO is in correct spot; if so, send to segment_loop
             if snd.una <= ackno && ackno <= snd.nxt && segment_tx.send(packet).is_ok() {}
             // if Established, should be able to receive segments
-        } else if *tcp_state == TCPState::Established {
+        } else {
             // other stuff TODO: like whatttt
             if segment_tx.send(packet).is_ok() {}
         }

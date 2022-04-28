@@ -1,14 +1,17 @@
-use crate::protocol::tcp::{tcp_errors::*, tcp_socket::WIN_SZ, *};
+use crate::protocol::tcp::tcp_errors::*;
 use snafu::ensure;
 
 use std::{
     cmp::{max, min},
     fmt,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
 };
 
-pub const BUFFER_SIZE: usize = u16::MAX as usize;
-// pub const BUFFER_SIZE: usize = 16;
+// pub const BUFFER_SIZE: usize = u16::MAX as usize;
+pub const BUFFER_SIZE: usize = 16;
+pub const BSIZE_U32: u32 = BUFFER_SIZE as u32;
+// pub const WIN_SZ: u16 = u16::MAX;
+pub const WIN_SZ: u16 = 8;
 
 /**
  * Control struct containing the send sequence space's variables.
@@ -18,10 +21,11 @@ pub const BUFFER_SIZE: usize = u16::MAX as usize;
  * - len: the length of the data in the buffer
  * - head: byte AFTER valid byte in buffer
  * - tail: the first valid byte in buffer
+ * - cv: condition variable for threads waiting on buffer to clear up
  *
- * - UNA: the first unacknowledged byte in the send sequence [NB: this is the buffer's head!]
+ * - UNA: the first unacknowledged byte in the send sequence
  * - NXT: the next byte to be sent
- * - WND: the window size allowed to be sent [NB: UNA+WND is the buffer's tail!]
+ * - WND: the window size allowed to be sent
  * - UP: the urgent pointer (UNUSED)
  * - WL1: segment sequence number for the last window update (TODO: what is this?)
  * - WL2: segment acknowledgment number used for the last window update (TODO: ^)
@@ -42,9 +46,10 @@ pub const BUFFER_SIZE: usize = u16::MAX as usize;
 // #[derive(Clone)]
 pub struct SendControlBuffer {
     pub buf: [u8; BUFFER_SIZE],
-    len: usize,
+    pub len: usize,
     head: usize,
     tail: usize,
+    cv: Condvar,
     pub una: u32,
     pub nxt: u32,
     pub wnd: u16,
@@ -61,6 +66,7 @@ impl SendControlBuffer {
             len: 0,
             head: 0,
             tail: 0,
+            cv: Condvar::new(),
             una: 0,
             nxt: 0,
             wnd: 0,
@@ -72,21 +78,18 @@ impl SendControlBuffer {
     }
 
     /**
-     * Attempts to read count bytes from send buffer's UNA. Updates NXT if applicable, but not
+     * Reads up to `count` bytes from the send buffer. Updates NXT if applicable, but not
      * UNA/tail.
      *
      * Returns:
-     * - SEQ of first byte in data, or Error
+     * - SEQ of first byte in data + num read, or None
      */
-    pub fn get_una(&mut self, data: &mut [u8], count: usize) -> TCPResult<u32> {
-        // check that there's enough data to read, and request isn't too large
-        ensure!(
-            count <= self.len && count <= self.wnd as usize,
-            NoDataSnafu {
-                count,
-                num_bytes: min(self.len, self.wnd as usize),
-            }
-        );
+    pub fn get_una(&mut self, data: &mut [u8], count: usize) -> Option<(u32, usize)> {
+        let count = min(count, min(self.len, self.wnd as usize));
+        // if no space, just return
+        if count == 0 {
+            return None;
+        }
 
         let una = self.una as usize;
         // we already enforce SND.UNA + count < SND.(UNA + WND)
@@ -98,67 +101,86 @@ impl SendControlBuffer {
             data[buf_bytes_left..count].copy_from_slice(&self.buf[..(count - buf_bytes_left)]);
         }
 
-        // update nxt
-        self.nxt = max(self.nxt, (self.una + count as u32) % BUFFER_SIZE as u32);
+        // Update NXT, if applicable
+        self.nxt = if self.nxt < self.una {
+            // If wrapped around, must inflate NXT's value
+            max(self.nxt + BSIZE_U32, self.una + count as u32) % BSIZE_U32
+        } else {
+            max(self.nxt, (self.una + count as u32) % BUFFER_SIZE as u32)
+        };
 
-        Ok(self.una)
+        // self.una is SEQNO of segment
+        Some((self.una, count))
     }
 
     /**
-     * Attempts to read count bytes from send buffer's NXT. Updates NXT, but not UNA/tail.
+     * Reads up to `count` bytes from the provided offset from SND.UNA in the send buffer. Can
+     * update NXT, but not UNA/tail.
      *
      * Returns:
-     * - SEQ of first byte in data, or Error
+     * - SEQ of first byte in data, or None if invalid offset
      */
-    pub fn get_nxt(&mut self, data: &mut [u8], count: usize) -> TCPResult<(u32, usize)> {
-        let num_readable = min(self.len, self.window_nxt() as usize);
+    pub fn get_off(&mut self, off: usize, data: &mut [u8], count: usize) -> Option<(u32, usize)> {
+        // get starting position; if not in (2), return None
+        let start = self.una as usize + off;
+        let start_u32 = start as u32;
+        if !self.in_una_window(start_u32) {
+            return None;
+        }
+
         // shrink count to the number available
-        let count = min(count, min(self.len, self.window_nxt() as usize));
+        let count = min(count, min(self.len, self.una_wnd_size() as usize));
 
-        ensure!(
-            count <= num_readable,
-            NoDataSnafu {
-                count,
-                num_bytes: num_readable,
-            }
-        );
-
-        // get count bytes
-        let nxt = self.nxt as usize;
         // we already enforce SND.NXT + count < SND.(UNA + WND)
-        if nxt + count < BUFFER_SIZE {
-            data[..count].copy_from_slice(&self.buf[nxt..(nxt + count)]);
+        if start + count < BUFFER_SIZE {
+            data[..count].copy_from_slice(&self.buf[start..(start + count)]);
         } else {
-            let buf_bytes_left = BUFFER_SIZE - nxt;
-            data[..buf_bytes_left].copy_from_slice(&self.buf[nxt..]);
+            let buf_bytes_left = BUFFER_SIZE - start;
+            data[..buf_bytes_left].copy_from_slice(&self.buf[start..]);
             data[buf_bytes_left..count].copy_from_slice(&self.buf[..(count - buf_bytes_left)]);
         }
 
-        let seq_no = self.nxt;
-        // update nxt
-        self.nxt = (self.nxt + count as u32) % BUFFER_SIZE as u32;
+        // Update NXT, if applicable
+        self.nxt = if self.nxt < start_u32 {
+            // If wrapped around, must inflate NXT's value
+            max(self.nxt + BSIZE_U32, (start + count) as u32) % BSIZE_U32
+        } else {
+            max(self.nxt, (start + count) as u32 % BSIZE_U32)
+        };
 
         // println!("[SCB::get_nxt] {}", self);
 
-        Ok((seq_no, count))
+        Some((start_u32, count))
     }
 
     /**
      * Gets all un-ACK'd segments from the buffer.
      */
-    pub fn get_una_segments(&mut self, seg_size: usize) -> TCPResult<Vec<(u32, Vec<u8>)>> {
-        let mut segments = Vec::new();
-        // temporarily update NXT, to interoperate with get_nxt
-        let old_nxt = self.nxt;
-        let diff = self.diff_nxt_una() as usize;
-        self.nxt = self.una;
+    pub fn get_una_segments(&mut self, seg_size: usize) -> Vec<(u32, Vec<u8>)> {
+        self.get_off_segments(0, seg_size)
+    }
 
+    /**
+     * Gets all un-ACK'd segments from the buffer, starting from the provided offset.
+     */
+    pub fn get_off_segments(&mut self, off: usize, seg_size: usize) -> Vec<(u32, Vec<u8>)> {
+        let mut segments = Vec::new();
+
+        // validate start position
+        let start = self.una as usize + off;
+        let start_u32 = start as u32;
+        if !self.in_una_window(start_u32) {
+            // if invalid, return empty Vec
+            return segments;
+        };
+
+        // compute number to read
+        let mut to_read = self.una_wnd_size() as usize - off;
         let mut n_read = 0;
         // while there's still stuff to read
-        while self.window_nxt() > 0 {
-            let num_bytes = min(seg_size, self.window_nxt() as usize);
+        while n_read < to_read {
             // get segment chunk!
-            let mut segment = vec![0; num_bytes];
+            let mut segment = vec![0; seg_size];
 
             // println!(
             // "[SCB::get_una_segments] segment.len(): {}, num_bytes: {}",
@@ -166,54 +188,34 @@ impl SendControlBuffer {
             // num_bytes
             // );
 
-            // stop once we hit WND
-            let (seg_seq, n_got) = match self.get_nxt(segment.as_mut_slice(), num_bytes) {
-                Ok((seg_seq, n_got)) => (seg_seq, n_got),
-                Err(_) => break,
-            };
+            // read up to seg_size of data (n_got will return actual amount)
+            let (seg_seq, n_got) =
+                match self.get_off(off + n_read, segment.as_mut_slice(), seg_size) {
+                    Some((ss, ng)) => (ss, ng),
+                    None => break, // theoretically, should never reach here
+                };
 
+            // resize to actual amount
             segment.resize(n_got, 0);
             // update control values
             n_read += n_got;
+            to_read -= n_got;
             segments.push((seg_seq, segment));
-
-            // if num gotten is less than num_bytes, break
-            if n_got < num_bytes {
-                break;
-            }
         }
-        // reset NXT if not enough read [TODO: emit an error]
-        self.nxt = if diff >= n_read { old_nxt } else { self.nxt };
 
-        Ok(segments)
-    }
+        // update SND.NXT to the amount read (which should be == end)
+        self.nxt = (start + n_read % BUFFER_SIZE) as u32;
 
-    /**
-     * Updates tail/una pointer by specified number of bytes (i.e. "consumes" those bytes!) by
-     * acknowledging them.
-     *
-     * TODO: do I really need, if I update tail and length in set_una?
-     */
-    pub fn skip_una(&mut self, count: usize) -> TCPResult<()> {
-        // check that there's enough data to jump forward by
-        ensure!(
-            count <= self.len && count <= self.wnd as usize,
-            NoDataSnafu {
-                count,
-                num_bytes: self.len
-            }
-        );
-
-        self.tail += count;
-        // also this is probably wrong
-        self.nxt += count as u32;
-
-        Ok(())
+        segments
     }
 
     /**
      * Fills the circular buffer with the specified slice of data. If not enough space, returns
      * without filling the buffer.
+     *
+     * [Philosophy: reads should always work, since we want to send UP TO the end of the data in
+     * the stream; however, when filling up the buffer, we don't want only part of our write
+     * operation to succeed; the stream may be mangled.]
      *
      * Inputs:
      * - data: a slice of data
@@ -225,10 +227,10 @@ impl SendControlBuffer {
         let msg_len = data.len();
         // ensure not above capacity
         ensure!(
-            msg_len <= BUFFER_SIZE,
+            msg_len <= self.capacity(),
             MsgSizeSnafu {
                 msg_len,
-                max_len: BUFFER_SIZE,
+                max_len: self.capacity(),
             }
         );
         // ensure not more than possible
@@ -261,6 +263,13 @@ impl SendControlBuffer {
         // TODO: notify condition variable? or do within sock.send
 
         Ok(msg_len)
+    }
+
+    /**
+     * Gets the end position of the Send sequence space (i.e. SND.UNA + SND.WND).
+     */
+    pub fn snd_end(&self) -> u32 {
+        (self.una + self.wnd as u32) % BSIZE_U32
     }
 
     /**
@@ -300,8 +309,8 @@ impl SendControlBuffer {
             self.wl2 = ack_no;
         }
 
-        let diff = self.diff_nxt_una();
-        let num_acked = (BUFFER_SIZE as u32 + ack_no - self.una) % BUFFER_SIZE as u32;
+        let diff = self.una_nxt_size();
+        let num_acked = (BSIZE_U32 + ack_no - self.una) % BSIZE_U32;
         self.una = ack_no;
         // only update nxt if more was ACKed
         self.nxt = if diff > num_acked { ack_no } else { self.nxt };
@@ -310,31 +319,48 @@ impl SendControlBuffer {
         self.tail = self.una as usize;
         self.len -= num_acked as usize;
 
+        // NOTE: because all SCBs are hidden behind mutexes, we can safely signal the CV here
+        // without performing additional synchronization.
+        if self.is_full() {
+            self.cv.notify_all()
+        }
+
         // TODO: remove from retransmission queue
 
         num_acked
     }
 
     /**
-     * Checks if the ACKNO is of currently un-ACK'd data (i.e. section 2 in the above picture).
+     * Checks if the ACKNO is of currently un-ACK'd data (i.e. section (2)).
      *
      * Inputs:
      * - ack_no: the SEG.ACK of a segment
      */
-    pub fn in_una_window(&self, ack_no: u32) -> bool {
+    pub fn in_una_nxt_window(&self, ack_no: u32) -> bool {
         // println!("[SCB::in_una_window] ack_no: {}, {}", ack_no, self);
 
         if self.nxt >= self.una {
             self.una <= ack_no && ack_no <= self.nxt
         } else {
-            (self.una <= ack_no && ack_no < BUFFER_SIZE as u32) || ack_no <= self.nxt
+            (self.una <= ack_no && ack_no < BSIZE_U32) || ack_no <= self.nxt
+        }
+    }
+
+    /**
+     * Checks if the ACKNO is in the UNA window (i.e. sections (2) + (3))
+     */
+    pub fn in_una_window(&self, ack_no: u32) -> bool {
+        if self.snd_end() < self.una {
+            self.una <= ack_no && ack_no < BSIZE_U32 || ack_no <= self.snd_end()
+        } else {
+            self.una <= ack_no && ack_no < self.snd_end()
         }
     }
 
     /**
      * Gets the size difference between NXT and UNA, i.e. (2) in the diagram.
      */
-    pub fn diff_nxt_una(&self) -> u32 {
+    pub fn una_nxt_size(&self) -> u32 {
         if self.nxt >= self.una {
             self.nxt - self.una
         } else {
@@ -345,17 +371,24 @@ impl SendControlBuffer {
     /**
      * Gets the window size allowed for new transmission [NXT..UNA+WND], i.e. (3) in the diagram
      */
-    pub fn window_nxt(&self) -> u32 {
+    pub fn nxt_wnd_size(&self) -> u32 {
         // shouldn't have to worry about circling around, since it only gets size?
         self.una + self.wnd as u32 - self.nxt
     }
 
     /**
+     * Gets the total window size allowed [UNA..UNA+WND], i.e. (2) + (3) in the diagram
+     */
+    pub fn una_wnd_size(&self) -> u32 {
+        self.una_nxt_size() + self.nxt_wnd_size()
+    }
+
+    /**
      * Checks if buffer is empty.
      */
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
+    // pub fn is_empty(&self) -> bool {
+    // self.len == 0
+    // }
 
     /**
      * Checks if buffer is full.
@@ -405,9 +438,10 @@ impl fmt::Display for SendControlBuffer {
  *
  * Fields:
  * - BUF: circular buffer containing receive information
- * - len: the length of the data in the buffer [NB: NXT-LEN is the head!]
+ * - len: the length of the data in the buffer
  * - head: byte AFTER last valid byte in buffer
  * - tail: first valid byte in buffer
+ * - cv: condition variable for threads waiting for content to arrive
  *
  * - NXT: the next byte (sequence number) to receive
  * - WND: the window size allowed to be received
@@ -431,6 +465,7 @@ pub struct RecvControlBuffer {
     pub len: usize,
     head: usize,
     tail: usize,
+    cv: Condvar,
     pub nxt: u32,
     pub wnd: u16,
     pub up: u16,
@@ -444,8 +479,9 @@ impl RecvControlBuffer {
             len: 0,
             head: 0,
             tail: 0,
+            cv: Condvar::new(),
             nxt: 0,
-            wnd: WIN_SZ, // TODO: what should initial window be? WIN_SZ?
+            wnd: WIN_SZ,
             up: 0,
             irs: 0,
         }
@@ -454,7 +490,7 @@ impl RecvControlBuffer {
     /**
      * Reads acknowledged bytes from the circular buffer. Updates tail, wnd, and len.
      */
-    pub fn read(&mut self, data: &mut [u8], count: usize) -> TCPResult<usize> {
+    pub fn read(&mut self, data: &mut [u8], count: usize) -> Option<usize> {
         // check that there's enough acknowledged data to read
         // ensure!(
         // count <= self.len, // which should be the same as nxt - tail
@@ -469,7 +505,7 @@ impl RecvControlBuffer {
 
         let count = min(count, self.len);
         if count == 0 {
-            return Ok(0);
+            return None;
         }
 
         // we already enforce that tail + count < RCV.NXT
@@ -488,7 +524,7 @@ impl RecvControlBuffer {
 
         // println!("[RCB::read] {}", self);
 
-        Ok(count)
+        Some(count)
     }
 
     /**

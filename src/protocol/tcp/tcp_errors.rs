@@ -10,7 +10,7 @@ pub enum TCPError {
     MsgSize { msg_len: usize, max_len: usize },
 
     #[snafu(display(
-        "Not enough buffer space right now [msg_len: {}, remaining len: {}]",
+        "[ENOBUFS] Not enough buffer space right now [msg_len: {}, remaining len: {}]",
         msg_len,
         remaining_len
     ))]
@@ -32,10 +32,17 @@ pub enum TCPError {
         command: String,
     },
 
-    #[snafu(display("{} not valid socket descriptor", sock_id))]
+    #[snafu(display("[EBADF] {} not valid socket descriptor", sock_id))]
     BadFd { sock_id: u8 },
 
-    #[snafu(display("{}:{} already in use! (if port < 1024, reserved)", addr, port))]
+    #[snafu(display("{}", error))]
+    InvalidArguments { error: String },
+
+    #[snafu(display(
+        "[EADDRINUSE] {}:{} already in use! (if port < 1024, reserved)",
+        addr,
+        port
+    ))]
     AddrInUse { addr: Ipv4Addr, port: u16 },
 }
 

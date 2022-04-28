@@ -263,11 +263,31 @@ impl TCPModule {
             .get_socket_by_id(id)
             .context(BadFdSnafu { sock_id: id })?;
 
+        let tcp_state = sock.get_tcp_state();
+        if !tcp_state.readable() || (tcp_state == TCPState::CloseWait && sock.get_rcv_len() == 0) {
+            return InvalidStateSnafu {
+                tcp_state,
+                command: String::from("v_read"),
+            }
+            .fail();
+        }
+
+        // if already stopped, emit error
+        if sock.r_closed.load(Ordering::Relaxed) {
+            return InvalidArgumentsSnafu {
+                error: String::from("[EINVAL] Socket closed for reading."),
+            }
+            .fail();
+        }
+
         // TODO: error handling
-        let mut n_read = sock.recv_buffer(buf, n_bytes)?;
+        let mut n_read = 0;
+
         while n_read == 0 {
-            thread::sleep(Duration::from_millis(100));
-            n_read = sock.recv_buffer(buf, n_bytes).unwrap();
+            match sock.recv_buffer(buf, n_bytes) {
+                Ok(n) => n_read = n,
+                Err(_) => thread::sleep(Duration::from_millis(100)),
+            }
         }
 
         Ok(n_read)
@@ -293,6 +313,14 @@ impl TCPModule {
             .get_socket_by_id(id)
             .context(BadFdSnafu { sock_id: id })?;
 
+        // if not writable, return error
+        if !sock.get_tcp_state().writable() {
+            return InvalidArgumentsSnafu {
+                error: String::from("[EINVAL] Socket be in either ESTAB or CLOSE_WAIT."),
+            }
+            .fail();
+        }
+
         let mut n_wrote = 0;
         // TODO: error handling
         while n_wrote < n_bytes {
@@ -308,6 +336,66 @@ impl TCPModule {
         }
 
         Ok(n_wrote)
+    }
+
+    /**
+     * Shutdown an connection.
+     *
+     * - if `how` is WriteClose, close the writing part (CLOSE from RFC, i.e. send FIN)
+     * - if `how` is ReadClose, close the reading part (no equivalent; all v_reads should return
+     * 0).
+     * - if `how` is BothClose, close both ends.
+     *
+     * Returns:
+     * - nothing on success, error on failure.
+     */
+    pub fn v_shutdown(&self, id: SocketID, how: ShutdownType) -> TCPResult<()> {
+        // attempt to find socket associated with ID
+        let mut sock = self
+            .sockets
+            .get_socket_by_id(id)
+            .context(BadFdSnafu { sock_id: id })?;
+
+        let tcp_state = sock.get_tcp_state();
+        let (src_sock, dst_sock) = self.get_sock_entry(id).unwrap();
+        let sock_entry = SocketEntry { src_sock, dst_sock };
+
+        // if in Listen or SynSent, delete TCB
+        if tcp_state.can_delete() {
+            self.sockets.delete_socket_by_entry(&sock_entry);
+            return Ok(());
+        }
+
+        if !tcp_state.can_shutdown() {
+            return InvalidArgumentsSnafu {
+                error: String::from("[EINVAL] socket must either be Established or CloseWait."),
+            }
+            .fail();
+        }
+
+        // on write/both close:
+        if how == ShutdownType::WriteClose || how == ShutdownType::BothClose {
+            // send FIN packet
+            if sock.send_fin().is_ok() {}
+            // change state to FinWait1 or LastAck, depending on state
+            if tcp_state == TCPState::Established {
+                sock.set_tcp_state(TCPState::FinWait1);
+                // add to pending sockets queue
+                self.pending_socks.insert(sock_entry);
+            } else {
+                // otherwise, just change to LastAck
+                // [TODO: can't remove from pending queue yet, unless we have separate TimeWait
+                // thread?]
+                sock.set_tcp_state(TCPState::LastAck);
+            }
+        }
+        // on read/both close:
+        if how == ShutdownType::ReadClose || how == ShutdownType::BothClose {
+            // just mark socket as closed; further reads should fail
+            sock.r_closed.store(true, Ordering::Relaxed);
+        }
+        // on success, return 0.
+        Ok(())
     }
 
     /**

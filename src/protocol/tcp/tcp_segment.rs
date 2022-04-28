@@ -87,6 +87,34 @@ impl TCPSegment {
         packet
     }
 
+    /**
+     * Creates a new TCP FIN segment. Sets the FIN+ACK control flag.
+     */
+    pub fn new_fin(
+        src_sock: SocketAddrV4,
+        dst_sock: SocketAddrV4,
+        seq_no: u32,
+        ack_no: u32,
+        win_sz: u16,
+    ) -> TCPSegment {
+        let mut packet = TCPSegment {
+            header: TcpHeader::new(src_sock.port(), dst_sock.port(), seq_no, win_sz),
+            data: Vec::new(),
+        };
+        // mark as FIN segment
+        packet.header.ack = true;
+        packet.header.fin = true;
+        packet.header.acknowledgment_number = ack_no;
+
+        // compute checksum TODO: error check
+        packet.header.checksum = packet
+            .header
+            .calc_checksum_ipv4_raw(src_sock.ip().octets(), dst_sock.ip().octets(), &packet.data)
+            .unwrap();
+
+        packet
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         // convert packet into bytes
         let mut header_bytes = Vec::<u8>::with_capacity(self.header.header_len() as usize);

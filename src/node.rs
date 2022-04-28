@@ -2,7 +2,7 @@ use crate::protocol::link::READ_TIMEOUT;
 use crate::protocol::network::{
     ip_packet::*, network_interfaces::*, rip::*, routing_table::*, test::*, InternetModule,
 };
-use crate::protocol::tcp::{tcp_utils::make_tcp_handler, *};
+use crate::protocol::tcp::{tcp_socket::ShutdownType, tcp_utils::make_tcp_handler, *};
 
 use dashmap::DashMap;
 use std::{
@@ -334,6 +334,34 @@ impl Node {
                     }
                 }
             }
+            "sd" => {
+                if args.len() != 2 && args.len() != 3 {
+                    eprintln!("Usage: \"sd <id> <read|write|both>\"");
+                } else {
+                    let sd_type = if args.len() == 2 {
+                        ShutdownType::WriteClose
+                    } else {
+                        match args[2] {
+                            "read" | "r" => ShutdownType::ReadClose,
+                            "write" | "w" => ShutdownType::WriteClose,
+                            "both" => ShutdownType::BothClose,
+                            _ => {
+                                eprintln!("Last argument must be <read|write|both>.");
+                                return;
+                            }
+                        }
+                    };
+
+                    match args[1].parse::<u8>() {
+                        Ok(sid) => {
+                            if let Err(e) = self.tcp_module.v_shutdown(sid, sd_type) {
+                                eprintln!("{}", e);
+                            }
+                        }
+                        Err(e) => eprintln!("{}", e),
+                    }
+                }
+            }
             "down" => {
                 if args.len() != 2 {
                     eprintln!("Usage: \"down <id>\"");
@@ -402,7 +430,7 @@ impl Node {
                     eprintln!("{}", e);
                 }
             }
-            "" => println!(),
+            "" => (),
             _ => eprintln!("Error: command not found. Help menu:\n{}", HELP_MSG),
         }
     }
@@ -466,6 +494,8 @@ const HELP_MSG: &str = " help (h)        : Print this list of commands
  s [sid] [data]  : Send a string to a socket. Blocks until v_write() returns.
  r [sid] [n_bytes] [y|n]: Try to read data from a socket. If last argument \"y\", blocks until n_bytes are
                           read or connection closes. If \"n\" (default), returns whenever v_read() returns.
+ sd [id] [read|write|both]: Shutdown a socket. \"read\"/\"r\" closes only the reading side; \"write\"/\"w\"
+                            closes only the writing side; \"both\" closes both. Default is \"write\".
 
  send [ip] [protocol] [payload] : sends payload with protocol=protocol to virtual-ip ip
  up [integer]   : Bring an interface \"up\" (it must be an existing interface, probably one you brought down)

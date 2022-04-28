@@ -14,8 +14,6 @@ use crate::protocol::{
     tcp::{control_buffers::*, tcp_errors::*, *},
 };
 
-pub const WIN_SZ: u16 = u16::MAX;
-// pub const WIN_SZ: u16 = 8;
 pub const MSS: usize = 536; // TODO: RFC 1122, p. 86 says "MUST" default of 536
 pub const ALPHA: f64 = 0.85;
 pub const BETA: f64 = 1.5;
@@ -32,6 +30,35 @@ pub enum TCPState {
     CloseWait,
     TimeWait,
     LastAck,
+}
+
+impl TCPState {
+    pub fn readable(&self) -> bool {
+        *self == TCPState::Established || *self == TCPState::FinWait1 || *self == TCPState::FinWait2
+    }
+
+    pub fn writable(&self) -> bool {
+        *self == TCPState::Established || *self == TCPState::CloseWait
+    }
+
+    pub fn should_send_ack(&self) -> bool {
+        *self == TCPState::Established || *self == TCPState::FinWait2
+    }
+
+    pub fn can_delete(&self) -> bool {
+        *self == TCPState::Listen || *self == TCPState::SynSent
+    }
+
+    pub fn can_shutdown(&self) -> bool {
+        *self == TCPState::SynRcvd || *self == TCPState::Established || *self == TCPState::CloseWait
+    }
+
+    pub fn closing(&self) -> bool {
+        *self == TCPState::FinWait1
+            || *self == TCPState::FinWait2
+            // || *self == TCPState::Closing // is closing necessary here?
+            || *self == TCPState::LastAck
+    }
 }
 
 impl fmt::Display for TCPState {
@@ -55,6 +82,13 @@ impl fmt::Display for TCPState {
     }
 }
 
+#[derive(PartialEq, Eq, Hash, Debug)]
+pub enum ShutdownType {
+    WriteClose,
+    ReadClose,
+    BothClose,
+}
+
 #[derive(Clone)]
 pub struct Socket {
     pub src_sock: SocketAddrV4,
@@ -70,6 +104,9 @@ pub struct Socket {
     pub rcv: Arc<Mutex<RecvControlBuffer>>,
     send_tx: SyncSender<IPPacket>,
     nagles: Arc<AtomicBool>,
+
+    // Mark as read closed
+    pub r_closed: Arc<AtomicBool>,
 }
 
 impl Socket {
@@ -90,6 +127,8 @@ impl Socket {
             rcv: Arc::new(Mutex::new(RecvControlBuffer::new())),
             send_tx,
             nagles: Arc::new(AtomicBool::new(false)),
+            //
+            r_closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -97,10 +136,15 @@ impl Socket {
      * Receives data from the other end of the connection.
      */
     pub fn recv_buffer(&self, buf: &mut [u8], n_bytes: usize) -> TCPResult<usize> {
-        // if invalid state, immediately return [TODO: add more states]
+        // if closed, automatically return 0
+        if self.r_closed.load(Ordering::Relaxed) {
+            return Ok(0);
+        }
+
+        // if invalid state, immediately return
         let tcp_state = self.get_tcp_state();
         ensure!(
-            tcp_state == TCPState::Established,
+            tcp_state.readable(),
             InvalidStateSnafu {
                 tcp_state,
                 command: String::from("RECV"),
@@ -110,7 +154,14 @@ impl Socket {
         let mut rcv = self.rcv.lock().unwrap();
 
         // return number of bytes read
-        rcv.read(buf, n_bytes)
+        match rcv.read(buf, n_bytes) {
+            Some(n) => Ok(n),
+            None => NoDataSnafu {
+                count: 0_usize,
+                num_bytes: n_bytes,
+            }
+            .fail(),
+        }
     }
 
     /**
@@ -120,7 +171,7 @@ impl Socket {
         // if invalid state, immediately return
         let tcp_state = self.get_tcp_state();
         ensure!(
-            tcp_state == TCPState::Established,
+            tcp_state.writable(),
             InvalidStateSnafu {
                 tcp_state,
                 command: String::from("SEND"),
@@ -140,12 +191,12 @@ impl Socket {
             // - amount of data in queue >= MSS
             // - there was no unconfirmed data, automatically send
             if snd.len() >= MSS || old_len == 0 {
-                let segments = snd.get_una_segments(MSS)?;
+                let segments = snd.get_una_segments(MSS);
                 self.send_segments(segments).unwrap();
             } // else { // otherwise, just buffer, which we've already done with snd.write }
         } else {
             // if no Nagle's, just send immediately
-            let segments = snd.get_una_segments(MSS)?;
+            let segments = snd.get_una_segments(MSS);
             self.send_segments(segments).unwrap();
         }
 
@@ -180,6 +231,13 @@ impl Socket {
      */
     pub fn get_space_left(&self) -> usize {
         self.snd.lock().unwrap().space_left()
+    }
+
+    /**
+     * Gets the number of bytes available in the recv buffer.
+     */
+    pub fn get_rcv_len(&self) -> usize {
+        self.rcv.lock().unwrap().len()
     }
 
     /**
@@ -257,6 +315,38 @@ impl Socket {
     }
 
     /**
+     * Sends a FIN segment to the other end of connection, signaling we will no longer write.
+     */
+    pub fn send_fin(&self) -> Result<()> {
+        println!("[{}] sending FIN to {}...", self.src_sock, self.dst_sock);
+
+        // get SEQ: should be byte after last byte sent (i.e. SND.NXT)
+        let seq = {
+            let mut snd = self.snd.lock().unwrap();
+            let old_nxt = snd.nxt;
+            snd.nxt += 1;
+            old_nxt
+        };
+
+        // get ACK and WIN_SZ
+        let (ack, win_sz) = RecvControlBuffer::get_rcv_ack(self.rcv.clone());
+
+        // make segment and packet
+        let segment = TCPSegment::new_fin(self.src_sock, self.dst_sock, seq, ack, win_sz);
+        let packet = IPPacket::new(
+            *self.src_sock.ip(),
+            *self.dst_sock.ip(),
+            segment.to_bytes()?,
+            TCP_TTL,
+            TCP_PROTOCOL,
+        );
+
+        // send to channel to process
+        if self.send_tx.send(packet).is_ok() {}
+        Ok(())
+    }
+
+    /**
      * Gets the current timer value.
      */
     pub fn get_timeout(&self) -> Instant {
@@ -300,5 +390,20 @@ impl Socket {
      */
     pub fn get_tcp_state(&self) -> TCPState {
         self.tcp_state.lock().unwrap().clone()
+    }
+
+    /**
+     * Sets the state of the TCP socket.
+     */
+    pub fn set_tcp_state(&mut self, state: TCPState) {
+        let mut tcp_state = self.tcp_state.lock().unwrap();
+        *tcp_state = state;
+    }
+
+    /**
+     * Checks if read end is closed.
+     */
+    pub fn r_closed(&self) -> bool {
+        self.r_closed.load(Ordering::Relaxed)
     }
 }

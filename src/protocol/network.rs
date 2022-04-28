@@ -68,10 +68,9 @@ impl InternetModule {
      * - the gateway address of the network interface, or None if no route.
      */
     pub fn get_gateway(&self, addr: &Ipv4Addr) -> Option<Ipv4Addr> {
-        match self.routing_table.get_route(addr) {
-            Some(route) => Some(route.gateway),
-            None => None,
-        }
+        self.routing_table
+            .get_route(addr)
+            .map(|route| route.gateway)
     }
 
     /**
