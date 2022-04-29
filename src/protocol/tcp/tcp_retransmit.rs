@@ -84,15 +84,8 @@ pub fn check_retransmission(
 pub fn check_data_retransmission(sock: Socket) {
     let mut rtx_q = sock.rtx_q.lock().unwrap();
     let snd = sock.snd.lock().unwrap();
-
     // pop the ACK'ed segments from queue
-    while !rtx_q.is_empty()
-        && rtx_q.front().unwrap().segment.header.sequence_number
-            + rtx_q.front().unwrap().segment.header.size
-            < snd.una
-    {
-        rtx_q.pop_front();
-    }
+    sock.clear_retransmissions();
 
     // all segments are ACK'ed
     if rtx_q.is_empty() {
