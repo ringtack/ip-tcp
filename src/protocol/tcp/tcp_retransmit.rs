@@ -28,42 +28,19 @@ pub fn check_retransmission(
             // iterate pending_socks
             for sock_entry in pending_socks.iter() {
                 let sock_entry = sock_entry.key().clone();
-
                 let sock = sockets.get_socket_by_entry(&sock_entry).unwrap();
-
-                // clear all packets that have been acknowledged already
-                sock.clear_retransmissions();
-
-                let rtx_q = sock.rtx_q.clone();
-                let mut rtx_q = rtx_q.lock().unwrap();
-
-                // if no more to retransmit, remove from pending
-                if rtx_q.is_empty() {
-                    to_delete.insert(sock_entry);
-                    continue;
-                }
 
                 match sock.get_tcp_state() {
                     TCPState::SynSent | TCPState::SynRcvd => {
-                        // first packet should be SYN; if not, just drop
-                        let rtx_seg = rtx_q.pop_front().unwrap();
-                        if rtx_seg.segment.header.syn {
-                            // if counter exceeds 2, add to delete and delete from sockets
-                            if rtx_seg.counter > 2 {
-                                to_delete.insert(sock_entry.clone());
-                                sockets.delete_socket_by_entry(&sock_entry);
-                            } else {
-                                // check if timer exceeds 2^(counter)
-                                let timeout =
-                                    Duration::from_secs(2_u64.pow(rtx_seg.counter as u32));
-                                if timeout <= rtx_seg.send_time.elapsed() {
-                                    // if time elapsed > timeout, retransmit
-                                    if sock
-                                        .send(rtx_seg.segment, true, rtx_seg.counter + 1)
-                                        .is_ok()
-                                    {}
-                                }
-                            }
+                        if check_syn_retransmissions(sock.clone()) {
+                            println!(
+                                "{}:{} failed to establish connection after 3 re-transmissions. Closing socket...",
+                                *sock.src_sock.ip(),
+                                sock.src_sock.port()
+                            );
+
+                            to_delete.insert(sock_entry.clone());
+                            sockets.delete_socket_by_entry(&sock_entry);
                         }
                     }
                     TCPState::Established
@@ -76,9 +53,50 @@ pub fn check_retransmission(
                 }
             }
 
-            thread::sleep(Duration::from_millis(1));
+            // remove all the bois that are done
+            for sock_entry in to_delete {
+                pending_socks.remove(&sock_entry);
+            }
+
+            thread::sleep(Duration::from_millis(1000));
         }
     })
+}
+
+/**
+ * Handler to check SYN segment retransmissions. If true, socket is done (so delete!).
+ */
+pub fn check_syn_retransmissions(sock: Socket) -> bool {
+    // clear all packets that have been acknowledged already
+    sock.clear_retransmissions();
+
+    // if no more to retransmit, remove from pending
+    if sock.rtx_q_empty() {
+        return true;
+    }
+
+    // first packet should be SYN; if not, just drop
+    let rtx_seg = sock.rtx_q_pop().unwrap();
+    if rtx_seg.segment.header.syn {
+        // if counter exceeds 2, add to delete and delete from sockets
+        if rtx_seg.counter > 2 {
+            return true;
+        } else {
+            // check if timer exceeds 2^(counter)
+            let timeout = Duration::from_secs(2_u64.pow(rtx_seg.counter as u32));
+            if timeout <= rtx_seg.send_time.elapsed() {
+                // if time elapsed > timeout, retransmit
+                if sock
+                    .send(rtx_seg.segment, true, rtx_seg.counter + 1)
+                    .is_ok()
+                {}
+            } else {
+                // otherwise, re-add to queue
+                sock.rtx_q_push(rtx_seg)
+            }
+        }
+    }
+    false
 }
 
 pub fn check_data_retransmission(sock: Socket) {

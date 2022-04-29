@@ -428,9 +428,17 @@ impl Socket {
         }
     }
 
-    pub fn pop_rtx_front(&self) -> Option<SegmentEntry> {
-        let rtx_q = self.rtx_q.clone();
-        let mut rtx_q = rtx_q.lock().unwrap();
+    pub fn rtx_q_empty(&self) -> bool {
+        self.rtx_q.lock().unwrap().is_empty()
+    }
+
+    pub fn rtx_q_pop(&self) -> Option<SegmentEntry> {
+        let mut rtx_q = self.rtx_q.lock().unwrap();
         rtx_q.pop_front()
+    }
+
+    pub fn rtx_q_push(&self, rtx_seg: SegmentEntry) {
+        let mut rtx_q = self.rtx_q.lock().unwrap();
+        rtx_q.push_back(rtx_seg)
     }
 }
