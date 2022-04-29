@@ -347,6 +347,8 @@ impl Socket {
             })
         }
 
+        if self.send_tx.send(packet).is_ok() {}
+
         Ok(())
     }
 
@@ -406,5 +408,29 @@ impl Socket {
      */
     pub fn r_closed(&self) -> bool {
         self.r_closed.load(Ordering::Relaxed)
+    }
+
+    pub fn clear_retransmissions(&self) {
+        let una = self.snd.lock().unwrap().una;
+        let rtx_q = self.rtx_q.clone();
+        let mut rtx_q = rtx_q.lock().unwrap();
+
+        // for all packets in the queue who have completely been acknowledged, remove
+        while !rtx_q.is_empty() {
+            let rtx_seg = rtx_q.front().unwrap();
+            let rtx_seg_end =
+                rtx_seg.segment.header.sequence_number + rtx_seg.segment.data.len() as u32;
+            if rtx_seg_end < una {
+                rtx_q.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn pop_rtx_front(&self) -> Option<SegmentEntry> {
+        let rtx_q = self.rtx_q.clone();
+        let mut rtx_q = rtx_q.lock().unwrap();
+        rtx_q.pop_front()
     }
 }
