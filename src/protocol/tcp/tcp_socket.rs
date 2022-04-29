@@ -5,7 +5,7 @@ use snafu::ensure;
 use std::{
     cmp::{max, min},
     fmt,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
     time::{Duration, Instant},
 };
 
@@ -84,12 +84,12 @@ impl fmt::Display for TCPState {
 
 #[derive(PartialEq, Eq, Hash, Debug)]
 pub enum ShutdownType {
-    WriteClose,
-    ReadClose,
-    BothClose,
+    Write,
+    Read,
+    Both,
 }
 
-pub struct SegmantEntry {
+pub struct SegmentEntry {
     pub segment: TCPSegment,
     pub send_time: Instant,
     pub counter: usize,
@@ -101,9 +101,17 @@ pub struct Socket {
     pub dst_sock: SocketAddrV4,
     pub tcp_state: Arc<Mutex<TCPState>>,
 
-    // timeout/retransmission information
-    pub timer: Arc<Mutex<Instant>>,
-    pub srtt: Arc<Mutex<Duration>>,
+    // timer for timewait
+    pub time_wait: Arc<Mutex<Option<Instant>>>,
+    // timer for zero probing
+    pub zero_probe: Arc<Mutex<Option<Instant>>>,
+    pub zp_counter: Arc<AtomicU8>,
+    // re-transmission timer, by Jacobson's + Karn's algorithm
+    pub prtt: Arc<Mutex<Duration>>,
+    // keep track of last time sent for RTT
+    pub time_sent: Arc<Mutex<Option<Instant>>>,
+    // queue for retransmitting segmants
+    pub retrans_q: Arc<Mutex<Vec<SegmentEntry>>>,
 
     // Send/Receive Control Structs
     pub snd: Arc<Mutex<SendControlBuffer>>,
@@ -113,9 +121,6 @@ pub struct Socket {
 
     // Mark as read closed
     pub r_closed: Arc<AtomicBool>,
-
-    // queue for retransmitting segmants
-    pub retrans_q: Arc<Mutex<Vec<SegmantEntry>>>,
 }
 
 impl Socket {
@@ -129,8 +134,14 @@ impl Socket {
             src_sock,
             dst_sock,
             tcp_state: Arc::new(Mutex::new(tcp_state)),
-            timer: Arc::new(Mutex::new(Instant::now())),
-            srtt: Arc::new(Mutex::new(Duration::ZERO)),
+            // timer information
+            time_wait: Arc::new(Mutex::new(None)),
+            zero_probe: Arc::new(Mutex::new(None)),
+            zp_counter: Arc::new(AtomicU8::new(0)),
+            prtt: Arc::new(Mutex::new(Duration::from_millis(1))),
+            time_sent: Arc::new(Mutex::new(None)),
+            // retransmission
+            retrans_q: Arc::new(Mutex::new(Vec::new())),
             //
             snd: Arc::new(Mutex::new(SendControlBuffer::new())),
             rcv: Arc::new(Mutex::new(RecvControlBuffer::new())),
@@ -138,8 +149,6 @@ impl Socket {
             nagles: Arc::new(AtomicBool::new(false)),
             //
             r_closed: Arc::new(AtomicBool::new(false)),
-            //
-            retrans_q: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -317,7 +326,7 @@ impl Socket {
 
     /**
      * Generic send function for sending TCP segment
-     */ 
+     */
     pub fn send(&self, segment: TCPSegment, retransmit: bool) -> Result<()> {
         let packet = IPPacket::new(
             *self.src_sock.ip(),
@@ -329,11 +338,11 @@ impl Socket {
 
         // add to retransmission queue if retransmit
         if retransmit {
-            self.retrans_q.lock().unwrap().push(SegmantEntry {
-                segment: segment,
+            self.retrans_q.lock().unwrap().push(SegmentEntry {
+                segment,
                 send_time: Instant::now(),
                 counter: 0,
-            });    
+            });
         }
 
         // and send to other!
@@ -342,33 +351,30 @@ impl Socket {
     }
 
     /**
-     * Gets the current timer value.
-     */
-    pub fn get_timeout(&self) -> Instant {
-        *self.timer.lock().unwrap()
-    }
-
-    /**
-     * Sets the current timer value.
-     */
-    pub fn set_timeout(&self, timer: Instant) {
-        *self.timer.lock().unwrap() = timer;
-    }
-
-    /**
-     * Updates the SRTT given a new RTT.
+     * Updates the IRTT given a new RTT.
      *
      * Inputs:
-     * - rtt: the computed RTT from sending data to receiving the ACK for that segment (not
-     * necessarily all of it!)
+     * - the time receiving the packet
      */
-    pub fn update_srtt(&mut self, rtt: Duration) {
-        let mut srtt = self.srtt.lock().unwrap();
-        *srtt = srtt.mul_f64(ALPHA) + rtt.mul_f64(1.0 - ALPHA);
+    pub fn update_prtt(&self, rtt: Instant) {
+        let mut time_sent = self.time_sent.lock().unwrap();
+        if *time_sent == None {
+            return;
+        }
+        let mut prtt = self.prtt.lock().unwrap();
+        *prtt = prtt.mul_f64(ALPHA) + rtt.duration_since(time_sent.unwrap()).mul_f64(1.0 - ALPHA);
+        *time_sent = None;
     }
 
     /**
-     * Computes the RTO of the socket, from the SRTT.
+     * Checks whether the socket has time sent.
+     */
+    pub fn has_time_sent(&self) -> bool {
+        *self.time_sent.lock().unwrap() != None
+    }
+
+    /**
+     * Computes the RTO of the socket, from the PRTT.
      *
      * Returns:
      * - the computed re-transmission timeout
@@ -376,8 +382,8 @@ impl Socket {
     pub fn get_rto(&self) -> Duration {
         // because constant Durations are nightly only...
         let (lbound, ubound) = (Duration::from_millis(1), Duration::from_millis(100));
-        let srtt = self.srtt.lock().unwrap();
-        min(ubound, max(lbound, srtt.mul_f64(BETA)))
+        let prtt = self.prtt.lock().unwrap();
+        min(ubound, max(lbound, prtt.mul_f64(BETA)))
     }
 
     /**

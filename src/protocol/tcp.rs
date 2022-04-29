@@ -374,7 +374,7 @@ impl TCPModule {
         }
 
         // on write/both close:
-        if how == ShutdownType::WriteClose || how == ShutdownType::BothClose {
+        if how == ShutdownType::Write || how == ShutdownType::Both {
             // send FIN packet
             if sock.send_fin().is_ok() {}
             // change state to FinWait1 or LastAck, depending on state
@@ -390,7 +390,7 @@ impl TCPModule {
             }
         }
         // on read/both close:
-        if how == ShutdownType::ReadClose || how == ShutdownType::BothClose {
+        if how == ShutdownType::Read || how == ShutdownType::Both {
             // just mark socket as closed; further reads should fail
             sock.r_closed.store(true, Ordering::Relaxed);
         }
