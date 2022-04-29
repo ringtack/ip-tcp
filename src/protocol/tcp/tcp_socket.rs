@@ -89,6 +89,12 @@ pub enum ShutdownType {
     BothClose,
 }
 
+pub struct SegmantEntry {
+    pub segment: TCPSegment,
+    pub send_time: Instant,
+    pub counter: usize,
+}
+
 #[derive(Clone)]
 pub struct Socket {
     pub src_sock: SocketAddrV4,
@@ -107,6 +113,9 @@ pub struct Socket {
 
     // Mark as read closed
     pub r_closed: Arc<AtomicBool>,
+
+    // queue for retransmitting segmants
+    pub retrans_q: Arc<Mutex<Vec<SegmantEntry>>>,
 }
 
 impl Socket {
@@ -129,6 +138,8 @@ impl Socket {
             nagles: Arc::new(AtomicBool::new(false)),
             //
             r_closed: Arc::new(AtomicBool::new(false)),
+            //
+            retrans_q: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -212,16 +223,8 @@ impl Socket {
             let (ack, win_sz) = RecvControlBuffer::get_rcv_ack(self.rcv.clone());
             let segment =
                 TCPSegment::new(self.src_sock, self.dst_sock, seg_seq, ack, win_sz, seg_data);
-            let packet = IPPacket::new(
-                *self.src_sock.ip(),
-                *self.dst_sock.ip(),
-                segment.to_bytes()?,
-                TCP_TTL,
-                TCP_PROTOCOL,
-            );
 
-            // and send to other!
-            if self.send_tx.send(packet).is_ok() {}
+            self.send(segment, true)?;
         }
         Ok(())
     }
@@ -248,17 +251,8 @@ impl Socket {
 
         // create TCP segment/IP packet
         let segment = TCPSegment::new_syn(self.src_sock, dst_sock, iss);
-        let packet = IPPacket::new(
-            *self.src_sock.ip(),
-            *dst_sock.ip(),
-            segment.to_bytes()?,
-            TCP_TTL,
-            TCP_PROTOCOL,
-        );
 
-        // send to channel to process
-        if self.send_tx.send(packet).is_ok() {}
-        Ok(())
+        self.send(segment, true)
     }
 
     /**
@@ -273,17 +267,7 @@ impl Socket {
         // create TCP segment/IP packet
         let segment =
             TCPSegment::new_syn_ack(self.src_sock, self.dst_sock, snd_iss, rcv_nxt, win_sz);
-        let packet = IPPacket::new(
-            *self.src_sock.ip(),
-            *self.dst_sock.ip(),
-            segment.to_bytes()?,
-            TCP_TTL,
-            TCP_PROTOCOL,
-        );
-
-        // send to channel to process
-        if self.send_tx.send(packet).is_ok() {}
-        Ok(())
+        self.send(segment, true)
     }
 
     /**
@@ -300,18 +284,7 @@ impl Socket {
             win_sz,
             Vec::new(),
         );
-        // create IP packet
-        let packet = IPPacket::new(
-            *self.src_sock.ip(),
-            *self.dst_sock.ip(),
-            segment.to_bytes()?,
-            TCP_TTL,
-            TCP_PROTOCOL,
-        );
-
-        // send to channel to process
-        if self.send_tx.send(packet).is_ok() {}
-        Ok(())
+        self.send(segment, false)
     }
 
     /**
@@ -333,6 +306,13 @@ impl Socket {
 
         // make segment and packet
         let segment = TCPSegment::new_fin(self.src_sock, self.dst_sock, seq, ack, win_sz);
+        self.send(segment, true)
+    }
+
+    /**
+     * Generic send function for sending TCP segment
+     */ 
+    pub fn send(&self, segment: TCPSegment, retransmit: bool) -> Result<()> {
         let packet = IPPacket::new(
             *self.src_sock.ip(),
             *self.dst_sock.ip(),
@@ -341,7 +321,16 @@ impl Socket {
             TCP_PROTOCOL,
         );
 
-        // send to channel to process
+        // add to retransmission queue if retransmit
+        if retransmit {
+            self.retrans_q.lock().unwrap().push(SegmantEntry {
+                segment: segment,
+                send_time: Instant::now(),
+                counter: 0,
+            });    
+        }
+
+        // and send to other!
         if self.send_tx.send(packet).is_ok() {}
         Ok(())
     }
