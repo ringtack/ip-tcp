@@ -12,7 +12,7 @@ use std::{
 
 use crate::protocol::{
     network::ip_packet::*,
-    tcp::{control_buffers::*, synchronized_queue::*, tcp_errors::*, *},
+    tcp::{control_buffers::*, tcp_errors::*, *},
 };
 
 pub const MSS: usize = 536; // TODO: RFC 1122, p. 86 says "MUST" default of 536
@@ -112,7 +112,7 @@ pub struct Socket {
     // keep track of last time sent for RTT
     pub time_sent: Arc<Mutex<Option<Instant>>>,
     // queue for retransmitting segmants
-    pub retrans_q: Arc<Mutex<Vec<SegmentEntry>>>,
+    pub rtx_q: Arc<Mutex<VecDeque<SegmentEntry>>>,
 
     // Send/Receive Control Structs
     pub snd: Arc<Mutex<SendControlBuffer>>,
@@ -122,9 +122,6 @@ pub struct Socket {
 
     // Mark as read closed
     pub r_closed: Arc<AtomicBool>,
-
-    // queue for retransmitting segmants
-    pub rtx_q: Arc<SynchronizedQueue<SegmantEntry>>,
 }
 
 impl Socket {
@@ -144,8 +141,8 @@ impl Socket {
             zp_counter: Arc::new(AtomicU8::new(0)),
             prtt: Arc::new(Mutex::new(Duration::from_millis(1))),
             time_sent: Arc::new(Mutex::new(None)),
-            // retransmission
-            retrans_q: Arc::new(Mutex::new(Vec::new())),
+            //
+            rtx_q: Arc::new(Mutex::new(VecDeque::new())),
             //
             snd: Arc::new(Mutex::new(SendControlBuffer::new())),
             rcv: Arc::new(Mutex::new(RecvControlBuffer::new())),
@@ -153,8 +150,6 @@ impl Socket {
             nagles: Arc::new(AtomicBool::new(false)),
             //
             r_closed: Arc::new(AtomicBool::new(false)),
-            //
-            rtx_q: Arc::new(SynchronizedQueue::new()),
         }
     }
 
@@ -334,7 +329,7 @@ impl Socket {
      * Generic send function for sending TCP segment
      */
     pub fn send(&self, segment: TCPSegment, retransmit: bool, counter: usize) -> Result<()> {
-        let mut rtx_q = self.rtx_q.clone();
+        let mut rtx_q = self.rtx_q.clone().lock().unwrap();
         let packet = IPPacket::new(
             *self.src_sock.ip(),
             *self.dst_sock.ip(),
@@ -345,12 +340,14 @@ impl Socket {
 
         // add to retransmission queue if retransmit
         if retransmit {
-            rtx_q.push(SegmantEntry {
-                segment: segment,
+            rtx_q.push_back(SegmentEntry {
+                segment,
                 send_time: Instant::now(),
-                counter: counter,
+                counter,
             })
         }
+
+        Ok(())
     }
 
     /**
