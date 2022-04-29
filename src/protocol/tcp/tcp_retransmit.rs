@@ -7,6 +7,8 @@ use crate::protocol::{
     tcp::{tcp_socket::*, *},
 };
 
+const RETRANSMIT_LIMIT: usize = 3;
+
 /**
  * Handles all retransmissions
  *
@@ -46,7 +48,19 @@ pub fn check_retransmission(
                     TCPState::Established
                     | TCPState::FinWait1
                     | TCPState::CloseWait
-                    | TCPState::Closing => (),
+                    | TCPState::Closing => {
+                        //TODO, if zero probing
+                        //else
+                        if check_data_retransmission(sock.clone()) {
+                            println!(
+                                "{}:{} failed to send data after 3 re-transmissions. Closing socket...",
+                                *sock.src_sock.ip(),
+                                sock.src_sock.port()
+                            );
+                            to_delete.insert(sock_entry.clone());
+                            sockets.delete_socket_by_entry(&sock_entry);
+                        }
+                    }
                     TCPState::TimeWait => (),
                     TCPState::LastAck => (),
                     _ => (),
@@ -79,7 +93,7 @@ pub fn check_syn_retransmissions(sock: Socket) -> bool {
     let rtx_seg = sock.rtx_q_pop().unwrap();
     if rtx_seg.segment.header.syn {
         // if counter exceeds 2, add to delete and delete from sockets
-        if rtx_seg.counter > 2 {
+        if rtx_seg.counter >= RETRANSMIT_LIMIT {
             return true;
         } else {
             // check if timer exceeds 2^(counter)
@@ -99,23 +113,26 @@ pub fn check_syn_retransmissions(sock: Socket) -> bool {
     false
 }
 
-pub fn check_data_retransmission(sock: Socket) {
-    let mut rtx_q = sock.rtx_q.lock().unwrap();
-    let snd = sock.snd.lock().unwrap();
+pub fn check_data_retransmission(sock: Socket) -> bool {
     // pop the ACK'ed segments from queue
     sock.clear_retransmissions();
-
     // all segments are ACK'ed
-    if rtx_q.is_empty() {
-        return;
+    if sock.rtx_q_empty() {
+        return true;
     }
 
     // retransmit all segments that are timed out
     let mut to_delete = 0;
+    let mut rtx_q = sock.rtx_q.lock().unwrap();
     for segment in rtx_q.iter() {
         if !is_segment_timeout(segment, &sock.get_rto()) {
             break;
         }
+        // if at limit, we close the socket by return true
+        if segment.counter >= RETRANSMIT_LIMIT {
+            return true;
+        }
+        // retransmit
         sock.send(segment.segment.clone(), true, segment.counter + 1)
             .is_ok();
         to_delete += 1;
@@ -123,6 +140,7 @@ pub fn check_data_retransmission(sock: Socket) {
     for _ in 0..to_delete {
         rtx_q.pop_front();
     }
+    return false;
 }
 
 pub fn is_segment_timeout(segment: &SegmentEntry, rto: &Duration) -> bool {
