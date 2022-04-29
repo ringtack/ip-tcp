@@ -2,10 +2,10 @@ pub mod control_buffers;
 pub mod socket_table;
 pub mod synchronized_queue;
 pub mod tcp_errors;
+pub mod tcp_retransmit;
 pub mod tcp_segment;
 pub mod tcp_socket;
 pub mod tcp_utils;
-pub mod tcp_retransmit;
 
 use dashmap::{iter::Iter, DashMap, DashSet};
 use etherparse::{Ipv4Header, TcpHeader};
@@ -25,8 +25,8 @@ use std::{
 };
 
 use self::{
-    socket_table::*, synchronized_queue::*, tcp_errors::*, tcp_segment::*, tcp_socket::*,
-    tcp_utils::*,
+    socket_table::*, synchronized_queue::*, tcp_errors::*, tcp_retransmit::*, tcp_segment::*,
+    tcp_socket::*, tcp_utils::*,
 };
 use crate::protocol::network::{ip_packet::*, Handler, InternetModule};
 
@@ -123,6 +123,10 @@ impl TCPModule {
         ));
         tcp_module.thrs.push(make_segment_loop(
             segment_rx,
+            tcp_module.sockets.clone(),
+            tcp_module.pending_socks.clone(),
+        ));
+        tcp_module.thrs.push(check_retransmission(
             tcp_module.sockets.clone(),
             tcp_module.pending_socks.clone(),
         ));
