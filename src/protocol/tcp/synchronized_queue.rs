@@ -43,6 +43,14 @@ where
     }
 
     /**
+     * Peeks the front of the queue.
+     */
+    pub fn front(&mut self) -> Option<T> {
+        let queue = self.queue.lock().unwrap();
+        queue.front().map(|elt| elt.clone())
+    }
+
+    /**
      * Pops an element from the queue. If empty, waits on CV until filled. If stopped, returns
      * error.
      */

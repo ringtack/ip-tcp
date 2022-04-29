@@ -26,14 +26,15 @@ pub fn check_retransmission(
         loop {
             // iterate pending_socks
             for sock_entry in pending_socks.iter() {
-                let sock = sockets.get_socket_by_entry(&sock_entry)?;
+                let sock = sockets.get_socket_by_entry(&sock_entry).unwrap();
+
                 match sock.get_tcp_state() {
                     TCPState::SynSent => (),
                     TCPState::SynRcvd => (),
                     TCPState::Established
                     | TCPState::FinWait1
                     | TCPState::CloseWait
-                    | TCPState::Closing => (),
+                    | TCPState::Closing => check_data_retransmission(sock),
                     TCPState::TimeWait => (),
                     TCPState::LastAck => (),
                     _ => (),
@@ -43,4 +44,17 @@ pub fn check_retransmission(
             thread::sleep(Duration::from_millis(1));
         }
     })
+}
+
+pub fn check_data_retransmission(sock: Socket) {
+    let mut rtx_q = sock.rtx_q;
+    let snd = sock.snd.lock().unwrap();
+    if rtx_q.is_empty() {
+        return;
+    }
+
+    // pop the queue
+    while rtx_q.front().unwrap().segment.header.sequence_number < snd.una {
+        rtx_q.pop();
+    }
 }

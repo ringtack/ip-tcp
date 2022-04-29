@@ -4,6 +4,7 @@ use std::{
     net::SocketAddrV4,
 };
 
+#[derive(Clone)]
 pub struct TCPSegment {
     pub header: TcpHeader,
     pub data: Vec<u8>,

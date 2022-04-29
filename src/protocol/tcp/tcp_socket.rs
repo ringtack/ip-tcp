@@ -4,6 +4,7 @@ use snafu::ensure;
 
 use std::{
     cmp::{max, min},
+    collections::VecDeque,
     fmt,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
@@ -11,7 +12,7 @@ use std::{
 
 use crate::protocol::{
     network::ip_packet::*,
-    tcp::{control_buffers::*, tcp_errors::*, *},
+    tcp::{control_buffers::*, synchronized_queue::*, tcp_errors::*, *},
 };
 
 pub const MSS: usize = 536; // TODO: RFC 1122, p. 86 says "MUST" default of 536
@@ -89,6 +90,7 @@ pub enum ShutdownType {
     BothClose,
 }
 
+#[derive(Clone)]
 pub struct SegmantEntry {
     pub segment: TCPSegment,
     pub send_time: Instant,
@@ -115,7 +117,7 @@ pub struct Socket {
     pub r_closed: Arc<AtomicBool>,
 
     // queue for retransmitting segmants
-    pub retrans_q: Arc<Mutex<Vec<SegmantEntry>>>,
+    pub rtx_q: Arc<SynchronizedQueue<SegmantEntry>>,
 }
 
 impl Socket {
@@ -139,7 +141,7 @@ impl Socket {
             //
             r_closed: Arc::new(AtomicBool::new(false)),
             //
-            retrans_q: Arc::new(Mutex::new(Vec::new())),
+            rtx_q: Arc::new(SynchronizedQueue::new()),
         }
     }
 
@@ -230,7 +232,7 @@ impl Socket {
             let segment =
                 TCPSegment::new(self.src_sock, self.dst_sock, seg_seq, ack, win_sz, seg_data);
 
-            self.send(segment, true)?;
+            self.send(segment, true, 0)?;
         }
         Ok(())
     }
@@ -258,7 +260,7 @@ impl Socket {
         // create TCP segment/IP packet
         let segment = TCPSegment::new_syn(self.src_sock, dst_sock, iss);
 
-        self.send(segment, true)
+        self.send(segment, true, 0)
     }
 
     /**
@@ -273,7 +275,7 @@ impl Socket {
         // create TCP segment/IP packet
         let segment =
             TCPSegment::new_syn_ack(self.src_sock, self.dst_sock, snd_iss, rcv_nxt, win_sz);
-        self.send(segment, true)
+        self.send(segment, true, 0)
     }
 
     /**
@@ -290,7 +292,7 @@ impl Socket {
             win_sz,
             Vec::new(),
         );
-        self.send(segment, false)
+        self.send(segment, false, 0)
     }
 
     /**
@@ -312,13 +314,14 @@ impl Socket {
 
         // make segment and packet
         let segment = TCPSegment::new_fin(self.src_sock, self.dst_sock, seq, ack, win_sz);
-        self.send(segment, true)
+        self.send(segment, true, 0)
     }
 
     /**
      * Generic send function for sending TCP segment
-     */ 
-    pub fn send(&self, segment: TCPSegment, retransmit: bool) -> Result<()> {
+     */
+    pub fn send(&self, segment: TCPSegment, retransmit: bool, counter: usize) -> Result<()> {
+        let mut rtx_q = self.rtx_q.clone();
         let packet = IPPacket::new(
             *self.src_sock.ip(),
             *self.dst_sock.ip(),
@@ -329,11 +332,11 @@ impl Socket {
 
         // add to retransmission queue if retransmit
         if retransmit {
-            self.retrans_q.lock().unwrap().push(SegmantEntry {
+            rtx_q.push(SegmantEntry {
                 segment: segment,
                 send_time: Instant::now(),
-                counter: 0,
-            });    
+                counter: counter,
+            });
         }
 
         // and send to other!
