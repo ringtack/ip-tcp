@@ -339,12 +339,12 @@ impl Node {
                     eprintln!("Usage: \"sd <id> <read|write|both>\"");
                 } else {
                     let sd_type = if args.len() == 2 {
-                        ShutdownType::WriteClose
+                        ShutdownType::Write
                     } else {
                         match args[2] {
-                            "read" | "r" => ShutdownType::ReadClose,
-                            "write" | "w" => ShutdownType::WriteClose,
-                            "both" => ShutdownType::BothClose,
+                            "read" | "r" => ShutdownType::Read,
+                            "write" | "w" => ShutdownType::Write,
+                            "both" => ShutdownType::Both,
                             _ => {
                                 eprintln!("Last argument must be <read|write|both>.");
                                 return;

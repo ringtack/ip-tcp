@@ -203,13 +203,11 @@ pub fn make_segment_loop(
 
                 // update send/receive sequence values
                 rcv.set_irs(seq_no);
-                if ack {
-                    snd.set_una(seq_no, ack_no, seg_wnd);
-                }
-                // TODO: remove relevant sections on retransmission queue
 
                 // If we've received SYN+ACK, so send SYN back and mark established
                 if ack {
+                    snd.set_una(seq_no, ack_no, seg_wnd);
+
                     println!(
                         "[{}] received SYN+ACK! establishing connection to {}.",
                         sock.src_sock, sock.dst_sock
@@ -264,8 +262,11 @@ pub fn make_segment_loop(
 
             // if in SYN_RCVD state...
             if *tcp_state == TCPState::SynRcvd {
-                // and FIN, move to CloseWait
-                if fin {
+                // update PRTT
+                sock.update_prtt(Instant::now());
+
+                // and FIN and should be next, move to CloseWait
+                if fin && rcv.nxt == seq_no {
                     *tcp_state = TCPState::CloseWait;
                     rcv.nxt += 1;
                     // send ACK back
@@ -333,8 +334,8 @@ pub fn make_segment_loop(
                     }
                 }
 
-                // if fin, update rcv.nxt
-                if fin {
+                // if fin and should be next RCV, update rcv.nxt
+                if fin && rcv.nxt == seq_no {
                     rcv.nxt += 1;
                 }
 
