@@ -329,7 +329,7 @@ impl Socket {
      * Generic send function for sending TCP segment
      */
     pub fn send(&self, segment: TCPSegment, retransmit: bool, counter: usize) -> Result<()> {
-        let mut rtx_q = self.rtx_q.clone().lock().unwrap();
+        let mut rtx_q = self.rtx_q.lock().unwrap();
         let packet = IPPacket::new(
             *self.src_sock.ip(),
             *self.dst_sock.ip(),
