@@ -228,6 +228,8 @@ impl Socket {
      * Sends all un-ACK'd data up until the window.
      */
     pub fn send_segments(&self, segments: Vec<(u32, Vec<u8>)>) -> Result<()> {
+        let mut time_sent = self.time_sent.lock().unwrap();
+        *time_sent = Some(Instant::now());
         // for each segment, create TCP segment/IP packet
         for (seg_seq, seg_data) in segments {
             println!(
@@ -329,7 +331,6 @@ impl Socket {
      * Generic send function for sending TCP segment
      */
     pub fn send(&self, segment: TCPSegment, retransmit: bool, counter: usize) -> Result<()> {
-        let mut rtx_q = self.rtx_q.lock().unwrap();
         let packet = IPPacket::new(
             *self.src_sock.ip(),
             *self.dst_sock.ip(),
@@ -340,7 +341,7 @@ impl Socket {
 
         // add to retransmission queue if retransmit
         if retransmit {
-            rtx_q.push_back(SegmentEntry {
+            self.rtx_q_push(SegmentEntry {
                 segment,
                 send_time: Instant::now(),
                 counter,
@@ -383,7 +384,7 @@ impl Socket {
      */
     pub fn get_rto(&self) -> Duration {
         // because constant Durations are nightly only...
-        let (lbound, ubound) = (Duration::from_millis(1), Duration::from_millis(100));
+        let (lbound, ubound) = (Duration::from_millis(10), Duration::from_millis(1000));
         let prtt = self.prtt.lock().unwrap();
         min(ubound, max(lbound, prtt.mul_f64(BETA)))
     }
@@ -420,7 +421,7 @@ impl Socket {
             let rtx_seg = rtx_q.front().unwrap();
             let rtx_seg_end =
                 rtx_seg.segment.header.sequence_number + rtx_seg.segment.data.len() as u32;
-            if rtx_seg_end < una {
+            if rtx_seg_end <= una {
                 rtx_q.pop_front();
             } else {
                 break;
@@ -435,6 +436,11 @@ impl Socket {
     pub fn rtx_q_pop(&self) -> Option<SegmentEntry> {
         let mut rtx_q = self.rtx_q.lock().unwrap();
         rtx_q.pop_front()
+    }
+
+    pub fn rtx_q_push_front(&self, rtx_seg: SegmentEntry) {
+        let mut rtx_q = self.rtx_q.lock().unwrap();
+        rtx_q.push_front(rtx_seg)
     }
 
     pub fn rtx_q_push(&self, rtx_seg: SegmentEntry) {

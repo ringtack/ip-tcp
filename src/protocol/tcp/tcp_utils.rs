@@ -262,9 +262,6 @@ pub fn make_segment_loop(
 
             // if in SYN_RCVD state...
             if *tcp_state == TCPState::SynRcvd {
-                // update PRTT
-                sock.update_prtt(Instant::now());
-
                 // and FIN and should be next, move to CloseWait
                 if fin && rcv.nxt == seq_no {
                     *tcp_state = TCPState::CloseWait;
@@ -451,6 +448,9 @@ pub fn make_tcp_handler(
                 return Ok(());
             }
         };
+
+        // update PRTT
+        sock.update_prtt(Instant::now());
 
         // repackage IPPacket, since we'll need to forward
         let packet = IPPacket {

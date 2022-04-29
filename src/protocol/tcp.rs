@@ -240,11 +240,11 @@ impl TCPModule {
         // send SYN segment
         if sock.send_syn(dst_sock, isn).is_ok() {}
 
-        // insert into pending socks
-        self.pending_socks.insert(sock_entry.clone());
-
         // insert into socket table
-        self.sockets.insert_entry(id, sock_entry, sock);
+        self.sockets.insert_entry(id, sock_entry.clone(), sock);
+
+        // insert into pending socks
+        self.pending_socks.insert(sock_entry);
 
         Ok(id)
     }
@@ -339,6 +339,10 @@ impl TCPModule {
                 }
             }
         }
+
+        // insert into pending sockets
+        self.pending_socks
+            .insert(self.sockets.get_socket_entry(id).unwrap());
 
         Ok(n_wrote)
     }
