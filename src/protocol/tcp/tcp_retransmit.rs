@@ -99,15 +99,32 @@ pub fn check_syn_retransmissions(sock: Socket) -> bool {
     false
 }
 
-// pub fn check_data_retransmission(sock: Socket) {
-// let mut rtx_q = sock.rtx_q;
-// let snd = sock.snd.lock().unwrap();
-// if rtx_q.is_empty() {
-// return;
-// }
+pub fn check_data_retransmission(sock: Socket) {
+    let mut rtx_q = sock.rtx_q.lock().unwrap();
+    let snd = sock.snd.lock().unwrap();
+    // pop the ACK'ed segments from queue
+    sock.clear_retransmissions();
 
-// // pop the queue
-// while rtx_q.front().unwrap().segment.header.sequence_number < snd.una {
-// rtx_q.pop();
-// }
-// }
+    // all segments are ACK'ed
+    if rtx_q.is_empty() {
+        return;
+    }
+
+    // retransmit all segments that are timed out
+    let mut to_delete = 0;
+    for segment in rtx_q.iter() {
+        if !is_segment_timeout(segment, &sock.get_rto()) {
+            break;
+        }
+        sock.send(segment.segment.clone(), true, segment.counter + 1)
+            .is_ok();
+        to_delete += 1;
+    }
+    for _ in 0..to_delete {
+        rtx_q.pop_front();
+    }
+}
+
+pub fn is_segment_timeout(segment: &SegmentEntry, rto: &Duration) -> bool {
+    segment.send_time.elapsed().ge(rto)
+}
