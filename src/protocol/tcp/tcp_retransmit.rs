@@ -1,3 +1,12 @@
+use dashmap::DashSet;
+
+use std::{thread, time::Instant};
+
+use crate::protocol::{
+    network::{ip_packet::*, InternetModule},
+    tcp::{tcp_socket::*, *},
+};
+
 /**
  * Handles all retransmissions
  *
@@ -16,11 +25,11 @@ pub fn check_retransmission(
     thread::spawn(move || {
         loop {
             // iterate pending_socks
-
-            // check => time => if timeout => retransmit
-
-
-            thread::sleep(1);   
+            for sock_entry in pending_socks.iter() {
+                let sock = sockets.get_socket_by_entry(&sock_entry);
+            }
+            
+            thread::sleep(Duration::from_millis(1));   
         }
-    }
+    })
 }

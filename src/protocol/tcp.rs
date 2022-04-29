@@ -5,6 +5,7 @@ pub mod tcp_errors;
 pub mod tcp_segment;
 pub mod tcp_socket;
 pub mod tcp_utils;
+pub mod tcp_retransmit;
 
 use dashmap::{iter::Iter, DashMap, DashSet};
 use etherparse::{Ipv4Header, TcpHeader};
