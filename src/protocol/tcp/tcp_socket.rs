@@ -209,6 +209,12 @@ impl Socket {
     pub fn send_segments(&self, segments: Vec<(u32, Vec<u8>)>) -> Result<()> {
         // for each segment, create TCP segment/IP packet
         for (seg_seq, seg_data) in segments {
+            println!(
+                "Sending segment with SEQ {} and size {}",
+                seg_seq,
+                seg_data.len()
+            );
+
             let (ack, win_sz) = RecvControlBuffer::get_rcv_ack(self.rcv.clone());
             let segment =
                 TCPSegment::new(self.src_sock, self.dst_sock, seg_seq, ack, win_sz, seg_data);

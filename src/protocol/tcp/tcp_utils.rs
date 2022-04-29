@@ -267,6 +267,9 @@ pub fn make_segment_loop(
                 // and FIN, move to CloseWait
                 if fin {
                     *tcp_state = TCPState::CloseWait;
+                    rcv.nxt += 1;
+                    // send ACK back
+                    if sock.send_ack(snd.nxt, rcv.nxt, rcv.wnd).is_ok() {}
                 // otherwise, if ACK in SND window, move to ESTABLISHED
                 } else if snd.in_una_nxt_window(ack_no) {
                     // update UNA & co. values
@@ -332,8 +335,7 @@ pub fn make_segment_loop(
 
                 // if fin, update rcv.nxt
                 if fin {
-                    let nxt = rcv.nxt + 1;
-                    rcv.set_nxt(nxt);
+                    rcv.nxt += 1;
                 }
 
                 // before we update, record if we should send an ack back
@@ -388,15 +390,6 @@ pub fn make_segment_loop(
         eprintln!("segment loop terminated.");
     })
 }
-
-/**
- * Handles pending socket requests.
- */
-// pub fn make_pending_sock_handler(
-// sockets: SocketTable,
-// pending_socks: Arc<DashSet<SocketEntry>>,
-// ) -> thread::JoinHandle<()> {
-// }
 
 /**
  * Construct TCP handler.

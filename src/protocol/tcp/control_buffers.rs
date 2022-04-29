@@ -7,6 +7,7 @@ use std::{
     sync::{Arc, Condvar, Mutex},
 };
 
+pub const SEQ_MAX: u32 = u32::MAX;
 // pub const BUFFER_SIZE: usize = u16::MAX as usize;
 pub const BUFFER_SIZE: usize = 16;
 pub const BSIZE_U32: u32 = BUFFER_SIZE as u32;
@@ -91,7 +92,7 @@ impl SendControlBuffer {
             return None;
         }
 
-        let una = self.una as usize;
+        let una = (self.una % BSIZE_U32) as usize;
         // we already enforce SND.UNA + count < SND.(UNA + WND)
         if una + count < BUFFER_SIZE {
             data[..count].copy_from_slice(&self.buf[una..(una + count)]);
@@ -101,16 +102,27 @@ impl SendControlBuffer {
             data[buf_bytes_left..count].copy_from_slice(&self.buf[..(count - buf_bytes_left)]);
         }
 
-        // Update NXT, if applicable
-        self.nxt = if self.nxt < self.una {
-            // If wrapped around, must inflate NXT's value
-            max(self.nxt + BSIZE_U32, self.una + count as u32) % BSIZE_U32
-        } else {
-            max(self.nxt, (self.una + count as u32) % BUFFER_SIZE as u32)
-        };
+        // Update NXT, if applicable [TODO: this doesn't wrap around u32::MAX]
+        self.nxt = max(self.una.wrapping_add(count as u32), self.nxt);
 
         // self.una is SEQNO of segment
         Some((self.una, count))
+    }
+
+    /**
+     * Reads up to `count` bytes from the provided position in the send buffer. Can update NXT,
+     * but not UNA/tail.
+     *
+     * Inputs:
+     * - pos: SEQUENCE NUMBER (not buffer pos!)
+     */
+    pub fn get_pos(&mut self, pos: usize, data: &mut [u8], count: usize) -> Option<(u32, usize)> {
+        let pos = pos as u32;
+        if !self.in_una_window(pos) {
+            return None;
+        }
+        let off = pos % BSIZE_U32 - self.una;
+        self.get_off(off as usize, data, count)
     }
 
     /**
@@ -124,29 +136,30 @@ impl SendControlBuffer {
         // get starting position; if not in (2), return None
         let start = self.una as usize + off;
         let start_u32 = start as u32;
-        if !self.in_una_window(start_u32) {
+        if !self.in_una_window(start_u32) || self.bytes_left(start % BUFFER_SIZE) == 0 {
             return None;
         }
 
         // shrink count to the number available
-        let count = min(count, min(self.len, self.una_wnd_size() as usize));
+        let count = min(
+            min(count, self.bytes_left(start % BUFFER_SIZE)), // cannot get more than # of relevant bytes left
+            self.una_wnd_size() as usize - off, // or number of bytes left in RCV window
+        );
+
+        // convert SEQ -> BUF space
+        let start_buf = start % BUFFER_SIZE;
 
         // we already enforce SND.NXT + count < SND.(UNA + WND)
-        if start + count < BUFFER_SIZE {
-            data[..count].copy_from_slice(&self.buf[start..(start + count)]);
+        if start_buf + count < BUFFER_SIZE {
+            data[..count].copy_from_slice(&self.buf[start_buf..(start_buf + count)]);
         } else {
-            let buf_bytes_left = BUFFER_SIZE - start;
-            data[..buf_bytes_left].copy_from_slice(&self.buf[start..]);
+            let buf_bytes_left = BUFFER_SIZE - start_buf;
+            data[..buf_bytes_left].copy_from_slice(&self.buf[start_buf..]);
             data[buf_bytes_left..count].copy_from_slice(&self.buf[..(count - buf_bytes_left)]);
         }
 
-        // Update NXT, if applicable
-        self.nxt = if self.nxt < start_u32 {
-            // If wrapped around, must inflate NXT's value
-            max(self.nxt + BSIZE_U32, (start + count) as u32) % BSIZE_U32
-        } else {
-            max(self.nxt, (start + count) as u32 % BSIZE_U32)
-        };
+        // Update NXT, if applicable [TODO: this doesn't wrap around u32::MAX]
+        self.nxt = max(self.nxt, start.wrapping_add(count) as u32);
 
         // println!("[SCB::get_nxt] {}", self);
 
@@ -167,15 +180,19 @@ impl SendControlBuffer {
         let mut segments = Vec::new();
 
         // validate start position
-        let start = self.una as usize + off;
-        let start_u32 = start as u32;
+        let start_u32 = self.una.wrapping_add(off as u32);
+        let start = start_u32 as usize;
         if !self.in_una_window(start_u32) {
             // if invalid, return empty Vec
             return segments;
         };
 
         // compute number to read
-        let mut to_read = self.una_wnd_size() as usize - off;
+        let mut to_read = min(
+            self.una_wnd_size() as usize - off, // bytes left in RCV'ing buffer's window
+            self.bytes_left(start % BUFFER_SIZE), // relevant bytes left in actual buffer
+        );
+
         let mut n_read = 0;
         // while there's still stuff to read
         while n_read < to_read {
@@ -204,7 +221,7 @@ impl SendControlBuffer {
         }
 
         // update SND.NXT to the amount read (which should be == end)
-        self.nxt = (start + n_read % BUFFER_SIZE) as u32;
+        self.nxt = start.wrapping_add(n_read) as u32;
 
         segments
     }
@@ -260,7 +277,6 @@ impl SendControlBuffer {
         self.len += msg_len;
 
         // println!("[SCB::write] {}", self);
-        // TODO: notify condition variable? or do within sock.send
 
         Ok(msg_len)
     }
@@ -269,7 +285,7 @@ impl SendControlBuffer {
      * Gets the end position of the Send sequence space (i.e. SND.UNA + SND.WND).
      */
     pub fn snd_end(&self) -> u32 {
-        (self.una + self.wnd as u32) % BSIZE_U32
+        self.una.wrapping_add(self.wnd as u32)
     }
 
     /**
@@ -279,13 +295,12 @@ impl SendControlBuffer {
      * - isn: the chosen initial sequence number
      */
     pub fn set_iss(&mut self, iss: u32) {
-        let b_size = BUFFER_SIZE as u32;
-        self.iss = iss % b_size;
-        self.una = iss % b_size;
-        self.nxt = (iss + 1) % b_size;
+        self.iss = iss;
+        self.una = iss;
+        self.nxt = iss + 1;
 
-        self.head = ((iss + 1) % b_size) as usize;
-        self.tail = ((iss + 1) % b_size) as usize;
+        self.head = ((iss + 1) % BSIZE_U32) as usize;
+        self.tail = ((iss + 1) % BSIZE_U32) as usize;
         self.len = 1; // hacky solution to let set_una through
     }
 
@@ -310,13 +325,17 @@ impl SendControlBuffer {
         }
 
         let diff = self.una_nxt_size();
-        let num_acked = (BSIZE_U32 + ack_no - self.una) % BSIZE_U32;
+        let num_acked = if ack_no > self.una {
+            ack_no - self.una
+        } else {
+            ack_no + SEQ_MAX - self.una
+        };
         self.una = ack_no;
         // only update nxt if more was ACKed
         self.nxt = if diff > num_acked { ack_no } else { self.nxt };
 
         // incremented last acknowledgment, so can "remove" from send buffer
-        self.tail = self.una as usize;
+        self.tail = self.una as usize % BUFFER_SIZE;
         self.len -= num_acked as usize;
 
         // NOTE: because all SCBs are hidden behind mutexes, we can safely signal the CV here
@@ -325,7 +344,7 @@ impl SendControlBuffer {
             self.cv.notify_all()
         }
 
-        // TODO: remove from retransmission queue
+        // TODO: remove from retransmission queue [do this in handler]
 
         num_acked
     }
@@ -342,7 +361,7 @@ impl SendControlBuffer {
         if self.nxt >= self.una {
             self.una <= ack_no && ack_no <= self.nxt
         } else {
-            (self.una <= ack_no && ack_no < BSIZE_U32) || ack_no <= self.nxt
+            (self.una <= ack_no && ack_no < SEQ_MAX) || ack_no <= self.nxt
         }
     }
 
@@ -351,7 +370,7 @@ impl SendControlBuffer {
      */
     pub fn in_una_window(&self, ack_no: u32) -> bool {
         if self.snd_end() < self.una {
-            self.una <= ack_no && ack_no < BSIZE_U32 || ack_no <= self.snd_end()
+            self.una <= ack_no && ack_no < SEQ_MAX || ack_no <= self.snd_end()
         } else {
             self.una <= ack_no && ack_no < self.snd_end()
         }
@@ -364,7 +383,7 @@ impl SendControlBuffer {
         if self.nxt >= self.una {
             self.nxt - self.una
         } else {
-            self.nxt + BUFFER_SIZE as u32 - self.una
+            self.nxt + SEQ_MAX - self.una
         }
     }
 
@@ -372,8 +391,11 @@ impl SendControlBuffer {
      * Gets the window size allowed for new transmission [NXT..UNA+WND], i.e. (3) in the diagram
      */
     pub fn nxt_wnd_size(&self) -> u32 {
-        // shouldn't have to worry about circling around, since it only gets size?
-        self.una + self.wnd as u32 - self.nxt
+        if self.snd_end() < self.nxt {
+            self.snd_end() + SEQ_MAX - self.nxt
+        } else {
+            self.snd_end() - self.nxt
+        }
     }
 
     /**
@@ -405,7 +427,18 @@ impl SendControlBuffer {
     }
 
     /**
-     * Returns how much space is left.
+     * Returns number of relevant bytes left in send buffer, from position. (BUF INDEX)
+     */
+    pub fn bytes_left(&self, b_pos: usize) -> usize {
+        if b_pos <= self.head {
+            self.head - b_pos
+        } else {
+            self.head + BUFFER_SIZE - b_pos
+        }
+    }
+
+    /**
+     * Returns how much space is left in the send buffer.
      */
     pub fn space_left(&self) -> usize {
         if self.tail > self.head {
@@ -542,6 +575,11 @@ impl RecvControlBuffer {
         let msg_len = data.len();
         let seg_end = seq_no + msg_len as u32;
 
+        // if previously empty, notify any waiters
+        if self.is_empty() {
+            self.cv.notify_all();
+        }
+
         // TODO: currently, only accepts ----[SEQ_NO...{RCV.NXT...SEG_END]...RCV.NXT+RCV.WND}----,
         // but ideally want more flexibility
         if !((seq_no <= self.nxt || self.nxt + self.wnd as u32 <= seq_no)
@@ -557,7 +595,7 @@ impl RecvControlBuffer {
         }
 
         // get only the relevant data
-        let diff = (self.nxt + BUFFER_SIZE as u32 - seq_no) as usize % BUFFER_SIZE;
+        let diff = self.nxt.wrapping_sub(seq_no) as usize % BUFFER_SIZE;
         let relevant_data = &data[diff..];
         let msg_len = relevant_data.len();
 
@@ -596,12 +634,11 @@ impl RecvControlBuffer {
         let old_head = self.head;
         // update head, nxt (aka ACK), wnd, and len
         self.head = (old_head + msg_len) % BUFFER_SIZE;
-        self.nxt = ((old_head + msg_len) % BUFFER_SIZE) as u32;
+        self.nxt = self.nxt.wrapping_add(msg_len as u32);
         self.wnd -= msg_len as u16;
         self.len += msg_len;
 
         // println!("[RCB::write] {}", self);
-        // TODO: notify condition variable? or do within sock.send
 
         Ok(msg_len)
     }
@@ -613,13 +650,12 @@ impl RecvControlBuffer {
      * - irs: the initial receive number (i.e. SEG.SEQ of SYN segment)
      */
     pub fn set_irs(&mut self, irs: u32) {
-        let b_size = BUFFER_SIZE as u32;
-        self.irs = irs % b_size;
-        self.nxt = (irs + 1) % b_size;
+        self.irs = irs;
+        self.nxt = irs + 1;
 
         self.len = 0;
-        self.head = (irs + 1) as usize;
-        self.tail = (irs + 1) as usize;
+        self.head = (irs + 1) as usize % BUFFER_SIZE;
+        self.tail = (irs + 1) as usize % BUFFER_SIZE;
     }
 
     /**
@@ -629,10 +665,17 @@ impl RecvControlBuffer {
      * - nxt: next SEQ value received
      */
     pub fn set_nxt(&mut self, nxt: u32) {
-        self.len += (nxt - self.nxt) as usize;
-        self.head = nxt as usize;
+        self.len += nxt.wrapping_sub(self.nxt) as usize;
+        self.head = nxt as usize % BUFFER_SIZE;
 
         self.nxt = nxt;
+    }
+
+    /**
+     * Gets the end of the receive window, in SEQNO space.
+     */
+    pub fn rcv_end(&self) -> u32 {
+        self.nxt.wrapping_add(self.wnd as u32)
     }
 
     /**
@@ -642,11 +685,10 @@ impl RecvControlBuffer {
      * - seq_no: the desired receive number
      */
     pub fn in_window(&self, seq_no: u32) -> bool {
-        let rcv_end = (self.nxt + self.wnd as u32) % BUFFER_SIZE as u32;
-        if self.nxt < rcv_end {
-            self.nxt <= seq_no && seq_no <= rcv_end
+        if self.nxt < self.rcv_end() {
+            self.nxt <= seq_no && seq_no <= self.rcv_end()
         } else {
-            self.nxt <= seq_no || seq_no <= rcv_end
+            self.nxt <= seq_no || seq_no < self.rcv_end()
         }
     }
 
@@ -727,10 +769,7 @@ impl RecvControlBuffer {
      */
     pub fn get_rcv_ack(this: Arc<Mutex<Self>>) -> (u32, u16) {
         let this = this.lock().unwrap();
-        (
-            // ((this.nxt as usize + BUFFER_SIZE - 1) % BUFFER_SIZE) as u32,
-            this.nxt, this.wnd,
-        )
+        (this.nxt, this.wnd)
     }
 }
 
