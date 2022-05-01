@@ -110,6 +110,25 @@ impl SendControlBuffer {
     }
 
     /**
+     * Gets the byte at the end of the send window (i.e. buf[SND.UNA + SND.WND]), or None if not
+     * present.
+     */
+    pub fn get_end(&self) -> Option<u8> {
+        let end = self.nxt % BSIZE_U32;
+        let end_usize = end as usize;
+
+        assert_eq!((self.tail + self.len) % BUFFER_SIZE, self.head);
+        // if end is past the head, nothing to send, so return
+        if (self.head < self.tail && (end_usize >= self.tail || end_usize < self.head))
+            || (self.tail <= end_usize && end_usize < self.head)
+        {
+            Some(self.buf[end_usize])
+        } else {
+            None
+        }
+    }
+
+    /**
      * Reads up to `count` bytes from the provided position in the send buffer. Can update NXT,
      * but not UNA/tail.
      *
@@ -158,7 +177,7 @@ impl SendControlBuffer {
             data[buf_bytes_left..count].copy_from_slice(&self.buf[..(count - buf_bytes_left)]);
         }
 
-        // Update NXT, if applicable [TODO: this doesn't wrap around u32::MAX]
+        // Update NXT, if applicable [TODO: this doesn't handle the wrap around u32::MAX]
         self.nxt = max(self.nxt, start.wrapping_add(count) as u32);
 
         // println!("[SCB::get_nxt] {}", self);
@@ -171,6 +190,13 @@ impl SendControlBuffer {
      */
     pub fn get_una_segments(&mut self, seg_size: usize) -> Vec<(u32, Vec<u8>)> {
         self.get_off_segments(0, seg_size)
+    }
+
+    /**
+     * Gets all not yet sent segments from the buffer.
+     */
+    pub fn get_nxt_segments(&mut self, seg_size: usize) -> Vec<(u32, Vec<u8>)> {
+        self.get_off_segments(self.nxt.wrapping_sub(self.una) as usize, seg_size)
     }
 
     /**
@@ -250,6 +276,15 @@ impl SendControlBuffer {
                 max_len: self.capacity(),
             }
         );
+        // if no space left, return error
+        ensure!(
+            self.space_left() > 0,
+            NoBufsSnafu {
+                msg_len,
+                remaining_len: self.space_left() as usize,
+            }
+        );
+
         // ensure not more than possible
         ensure!(
             msg_len <= self.space_left() as usize,
@@ -318,6 +353,12 @@ impl SendControlBuffer {
      * Reference: RFC 793, p. 72
      */
     pub fn set_una(&mut self, seq_no: u32, ack_no: u32, seg_wnd: u16) -> u32 {
+        // NOTE: because all SCBs are hidden behind mutexes, we can safely signal the CV here
+        // without performing additional synchronization.
+        if self.is_full() {
+            self.cv.notify_all()
+        }
+
         if self.wl1 < seq_no || (self.wl1 == seq_no && self.wl2 < ack_no) {
             self.wnd = seg_wnd;
             self.wl1 = seq_no;
@@ -337,12 +378,6 @@ impl SendControlBuffer {
         // incremented last acknowledgment, so can "remove" from send buffer
         self.tail = self.una as usize % BUFFER_SIZE;
         self.len -= num_acked as usize;
-
-        // NOTE: because all SCBs are hidden behind mutexes, we can safely signal the CV here
-        // without performing additional synchronization.
-        if self.is_full() {
-            self.cv.notify_all()
-        }
 
         // TODO: remove from retransmission queue [do this in handler]
 
@@ -408,9 +443,9 @@ impl SendControlBuffer {
     /**
      * Checks if buffer is empty.
      */
-    // pub fn is_empty(&self) -> bool {
-    // self.len == 0
-    // }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 
     /**
      * Checks if buffer is full.
@@ -430,7 +465,7 @@ impl SendControlBuffer {
      * Returns number of relevant bytes left in send buffer, from position. (BUF INDEX)
      */
     pub fn bytes_left(&self, b_pos: usize) -> usize {
-        if b_pos <= self.head {
+        if b_pos < self.head {
             self.head - b_pos
         } else {
             self.head + BUFFER_SIZE - b_pos
@@ -441,11 +476,12 @@ impl SendControlBuffer {
      * Returns how much space is left in the send buffer.
      */
     pub fn space_left(&self) -> usize {
-        if self.tail > self.head {
-            self.tail - self.head
-        } else {
-            BUFFER_SIZE - self.head + self.tail
-        }
+        // if self.tail > self.head {
+        // self.tail - self.head
+        // } else {
+        // BUFFER_SIZE - self.head + self.tail
+        // }
+        BUFFER_SIZE - self.len // lol right??? what am I doing
     }
 
     /**

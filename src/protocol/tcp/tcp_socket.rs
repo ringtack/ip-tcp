@@ -1,12 +1,10 @@
 // use concurrent_queue::ConcurrentQueue;
 // use rb::{Consumer, Producer, SpscRb};
-use snafu::ensure;
-
 use std::{
     cmp::{max, min},
     collections::VecDeque,
     fmt,
-    sync::atomic::{AtomicBool, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
     time::{Duration, Instant},
 };
 
@@ -15,9 +13,12 @@ use crate::protocol::{
     tcp::{control_buffers::*, tcp_errors::*, *},
 };
 
-pub const MSS: usize = 536; // TODO: RFC 1122, p. 86 says "MUST" default of 536
+pub const MSS: usize = 4; // 536; // RFC 1122, p. 86 says "MUST" default of 536
+pub const MSL: u64 = 10; // in S
 pub const ALPHA: f64 = 0.85;
 pub const BETA: f64 = 1.5;
+pub const LBOUND: u64 = 10; // in MS
+pub const UBOUND: u64 = 2000; // in MS
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TCPState {
@@ -106,7 +107,8 @@ pub struct Socket {
     pub time_wait: Arc<Mutex<Option<Instant>>>,
     // timer for zero probing
     pub zero_probe: Arc<Mutex<Option<Instant>>>,
-    pub zp_counter: Arc<AtomicU8>,
+    pub zp_counter: Arc<AtomicU32>,
+    pub zp_timeout: Arc<AtomicU32>,
     // re-transmission timer, by Jacobson's + Karn's algorithm
     pub prtt: Arc<Mutex<Duration>>,
     // keep track of last time sent for RTT
@@ -138,8 +140,9 @@ impl Socket {
             // timer information
             time_wait: Arc::new(Mutex::new(None)),
             zero_probe: Arc::new(Mutex::new(None)),
-            zp_counter: Arc::new(AtomicU8::new(0)),
-            prtt: Arc::new(Mutex::new(Duration::from_millis(1))),
+            zp_counter: Arc::new(AtomicU32::new(0)),
+            zp_timeout: Arc::new(AtomicU32::new(0)),
+            prtt: Arc::new(Mutex::new(Duration::from_millis(LBOUND))),
             time_sent: Arc::new(Mutex::new(None)),
             //
             rtx_q: Arc::new(Mutex::new(VecDeque::new())),
@@ -157,20 +160,22 @@ impl Socket {
      * Receives data from the other end of the connection.
      */
     pub fn recv_buffer(&self, buf: &mut [u8], n_bytes: usize) -> TCPResult<usize> {
-        // if closed, automatically return 0
-        if self.r_closed.load(Ordering::Relaxed) {
-            return Ok(0);
-        }
+        //// Should already be done in v_read!
 
-        // if invalid state, immediately return
-        let tcp_state = self.get_tcp_state();
-        ensure!(
-            tcp_state.readable(),
-            InvalidStateSnafu {
-                tcp_state,
-                command: String::from("RECV"),
-            }
-        );
+        // if closed, automatically return 0
+        // if self.r_closed.load(Ordering::Relaxed) {
+        // return Ok(0);
+        // }
+
+        // // if invalid state, immediately return
+        // let tcp_state = self.get_tcp_state();
+        // ensure!(
+        // tcp_state.readable(),
+        // InvalidStateSnafu {
+        // tcp_state,
+        // command: String::from("RECV"),
+        // }
+        // );
 
         let mut rcv = self.rcv.lock().unwrap();
 
@@ -189,20 +194,23 @@ impl Socket {
      * Sends a created segment to other end of the connection.
      */
     pub fn send_buffer(&self, buf: &[u8]) -> TCPResult<usize> {
+        //// Should already be done in v_write!
+
         // if invalid state, immediately return
-        let tcp_state = self.get_tcp_state();
-        ensure!(
-            tcp_state.writable(),
-            InvalidStateSnafu {
-                tcp_state,
-                command: String::from("SEND"),
-            }
-        );
+        // let tcp_state = self.get_tcp_state();
+        // ensure!(
+        // tcp_state.writable(),
+        // InvalidStateSnafu {
+        // tcp_state,
+        // command: String::from("SEND"),
+        // }
+        // );
 
         let mut snd = self.snd.lock().unwrap();
         let old_len = snd.len();
 
         // attempt to write to circular buffer
+        // TODO: move condition variable from SCB/RCB into socket, then signal if full here
         snd.write(buf)?;
 
         // if Nagle's algorithm is enabled, follow algorithm
@@ -213,23 +221,42 @@ impl Socket {
             // - there was no unconfirmed data, automatically send
             if snd.len() >= MSS || old_len == 0 {
                 let segments = snd.get_una_segments(MSS);
-                self.send_segments(segments).unwrap();
+                self.send_segments(segments, None).unwrap();
             } // else { // otherwise, just buffer, which we've already done with snd.write }
         } else {
             // if no Nagle's, just send immediately
             let segments = snd.get_una_segments(MSS);
-            self.send_segments(segments).unwrap();
+            self.send_segments(segments, None).unwrap();
         }
 
         Ok(buf.len())
     }
 
     /**
-     * Sends all un-ACK'd data up until the window.
+     * Sends a segment of data, with the specified SEQ, ACK, and WND.
      */
-    pub fn send_segments(&self, segments: Vec<(u32, Vec<u8>)>) -> Result<()> {
-        let mut time_sent = self.time_sent.lock().unwrap();
-        *time_sent = Some(Instant::now());
+    pub fn send_bytes(&self, bytes: Vec<u8>, seq: u32, ack: u32, wnd: u16) -> Result<()> {
+        // mark time of transmission
+        self.set_time_sent();
+
+        // make segment
+        let segment = TCPSegment::new(self.src_sock, self.dst_sock, seq, ack, wnd, bytes);
+
+        // send with retransmission
+        self.send(segment, true, 0)
+    }
+
+    /**
+     * Sends all un-ACK'd data up until the window. Optionally specify ack/wnd.
+     */
+    pub fn send_segments(
+        &self,
+        segments: Vec<(u32, Vec<u8>)>,
+        ack_wnd: Option<(u32, u16)>,
+    ) -> Result<()> {
+        // mark start of transmission
+        self.set_time_sent();
+
         // for each segment, create TCP segment/IP packet
         for (seg_seq, seg_data) in segments {
             println!(
@@ -238,9 +265,12 @@ impl Socket {
                 seg_data.len()
             );
 
-            let (ack, win_sz) = RecvControlBuffer::get_rcv_ack(self.rcv.clone());
+            let (ack, win) = match ack_wnd {
+                Some((ack, win)) => (ack, win),
+                None => RecvControlBuffer::get_rcv_ack(self.rcv.clone()),
+            };
             let segment =
-                TCPSegment::new(self.src_sock, self.dst_sock, seg_seq, ack, win_sz, seg_data);
+                TCPSegment::new(self.src_sock, self.dst_sock, seg_seq, ack, win, seg_data);
 
             self.send(segment, true, 0)?;
         }
@@ -248,17 +278,11 @@ impl Socket {
     }
 
     /**
-     * Gets the amount of space left in the send buffer.
+     * Process incoming data, either discarding it (if out of window), adding to incoming_segs if
+     * out of order, or directly writing to RecvControlBuffer.
      */
-    pub fn get_space_left(&self) -> usize {
-        self.snd.lock().unwrap().space_left()
-    }
-
-    /**
-     * Gets the number of bytes available in the recv buffer.
-     */
-    pub fn get_rcv_len(&self) -> usize {
-        self.rcv.lock().unwrap().len()
+    pub fn process_data(&self, rcv: RecvControlBuffer, buf: &[u8]) -> Result<()> {
+        Ok(())
     }
 
     /**
@@ -354,6 +378,20 @@ impl Socket {
     }
 
     /**
+     * Gets the amount of space left in the send buffer.
+     */
+    pub fn get_space_left(&self) -> usize {
+        self.snd.lock().unwrap().space_left()
+    }
+
+    /**
+     * Gets the number of bytes available in the recv buffer.
+     */
+    pub fn get_rcv_len(&self) -> usize {
+        self.rcv.lock().unwrap().len()
+    }
+
+    /**
      * Updates the IRTT given a new RTT.
      *
      * Inputs:
@@ -370,10 +408,11 @@ impl Socket {
     }
 
     /**
-     * Checks whether the socket has time sent.
+     * Set time sent to now.
      */
-    pub fn has_time_sent(&self) -> bool {
-        *self.time_sent.lock().unwrap() != None
+    pub fn set_time_sent(&self) {
+        let mut time_sent = self.time_sent.lock().unwrap();
+        *time_sent = Some(Instant::now());
     }
 
     /**
@@ -384,7 +423,7 @@ impl Socket {
      */
     pub fn get_rto(&self) -> Duration {
         // because constant Durations are nightly only...
-        let (lbound, ubound) = (Duration::from_millis(10), Duration::from_millis(1000));
+        let (lbound, ubound) = (Duration::from_millis(LBOUND), Duration::from_millis(UBOUND));
         let prtt = self.prtt.lock().unwrap();
         min(ubound, max(lbound, prtt.mul_f64(BETA)))
     }
@@ -399,9 +438,8 @@ impl Socket {
     /**
      * Sets the state of the TCP socket.
      */
-    pub fn set_tcp_state(&mut self, state: TCPState) {
-        let mut tcp_state = self.tcp_state.lock().unwrap();
-        *tcp_state = state;
+    pub fn set_tcp_state(&self, state: TCPState) {
+        *self.tcp_state.lock().unwrap() = state;
     }
 
     /**
@@ -411,6 +449,79 @@ impl Socket {
         self.r_closed.load(Ordering::Relaxed)
     }
 
+    /**
+     * Start TimeWait timer.
+     */
+    pub fn start_time_wait(&self) {
+        *self.time_wait.lock().unwrap() = Some(Instant::now());
+    }
+
+    /**
+     * Initiate zero-probing.
+     */
+    pub fn start_zero_probing(&self) {
+        // start zero-probing at this time
+        *self.zero_probe.lock().unwrap() = Some(Instant::now());
+        // initialize number of ACKs and timeouts to 0
+        self.zp_counter.store(0, Ordering::Relaxed);
+        self.zp_timeout.store(0, Ordering::Relaxed);
+    }
+
+    /**
+     * Stop zero-probing.
+     */
+    pub fn stop_zero_probing(&self) {
+        // stop zero-probing
+        *self.zero_probe.lock().unwrap() = None;
+        // reset counters
+        self.zp_counter.store(0, Ordering::Relaxed);
+        self.zp_timeout.store(0, Ordering::Relaxed);
+
+        // rtx_q will eventually be handled in handler, so don't need anything
+    }
+
+    /**
+     * Increments zero-probing counter (i.e. when we receive an ACK). Resets timeout counter.
+     */
+    pub fn inc_zp_counter(&self) {
+        // reinitialize timer
+        *self.zero_probe.lock().unwrap() = Some(Instant::now());
+
+        // increment counter by 1 [NOTE: this overflows, but only downside is quicker
+        // retransmission of ZP for a bit]
+        self.zp_counter.fetch_add(1, Ordering::Relaxed);
+        // reset timeout counter
+        self.zp_timeout.store(0, Ordering::Relaxed);
+    }
+
+    /**
+     * Increments timeout counter. Resets zero-probing time.
+     */
+    pub fn inc_timeout_counter(&self) {
+        *self.zero_probe.lock().unwrap() = Some(Instant::now());
+        self.zp_timeout.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /**
+     * Get zp counter and timeout.
+     */
+    pub fn get_zp_counters(&self) -> (u32, u32) {
+        (
+            self.zp_counter.load(Ordering::Relaxed),
+            self.zp_timeout.load(Ordering::Relaxed),
+        )
+    }
+
+    /**
+     * Checks if socket is currently zero probing.
+     */
+    pub fn is_zero_probing(&self) -> bool {
+        self.zero_probe.lock().unwrap().is_some()
+    }
+
+    /**
+     * Clears all re-transmissions that have been acknowledged.
+     */
     pub fn clear_retransmissions(&self) {
         let una = self.snd.lock().unwrap().una;
         let rtx_q = self.rtx_q.clone();
@@ -419,8 +530,13 @@ impl Socket {
         // for all packets in the queue who have completely been acknowledged, remove
         while !rtx_q.is_empty() {
             let rtx_seg = rtx_q.front().unwrap();
-            let rtx_seg_end =
+            let mut rtx_seg_end =
                 rtx_seg.segment.header.sequence_number + rtx_seg.segment.data.len() as u32;
+
+            if rtx_seg.segment.header.syn || rtx_seg.segment.header.fin {
+                rtx_seg_end += 1;
+            }
+
             if rtx_seg_end <= una {
                 rtx_q.pop_front();
             } else {
@@ -429,22 +545,42 @@ impl Socket {
         }
     }
 
+    /**
+     * Wrapper around retransmission queue empty.
+     */
     pub fn rtx_q_empty(&self) -> bool {
         self.rtx_q.lock().unwrap().is_empty()
     }
 
+    /**
+     * Wrapper around retransmission queue pop.
+     */
     pub fn rtx_q_pop(&self) -> Option<SegmentEntry> {
         let mut rtx_q = self.rtx_q.lock().unwrap();
         rtx_q.pop_front()
     }
 
+    /**
+     * Wrapper around retransmission queue push_front.
+     */
     pub fn rtx_q_push_front(&self, rtx_seg: SegmentEntry) {
         let mut rtx_q = self.rtx_q.lock().unwrap();
         rtx_q.push_front(rtx_seg)
     }
 
+    /**
+     * Wrapper around retransmission queue push (back).
+     */
     pub fn rtx_q_push(&self, rtx_seg: SegmentEntry) {
         let mut rtx_q = self.rtx_q.lock().unwrap();
         rtx_q.push_back(rtx_seg)
+    }
+
+    /**
+     * Clear retransmission queue.
+     */
+    pub fn rtx_q_clear(&self) {
+        let mut rtx_q = self.rtx_q.lock().unwrap();
+        rtx_q.clear();
     }
 }

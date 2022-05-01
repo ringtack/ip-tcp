@@ -330,10 +330,14 @@ impl TCPModule {
         // TODO: error handling
         while n_wrote < n_bytes {
             let n_to_write = min(n_bytes - n_wrote, sock.get_space_left());
+
+            // TODO: if n_to_write == 0, wait on CV (or do within send_buffer)
+            // println!("[v_write] n_to_write: {}", n_to_write);
+
             n_wrote += match sock.send_buffer(&buf[n_wrote..(n_wrote + n_to_write)]) {
                 Ok(n_written) => n_written,
                 Err(e) => {
-                    eprintln!("[v_write] {}", e);
+                    // eprintln!("[v_write] {}", e);
                     thread::sleep(Duration::from_millis(100));
                     0
                 }
@@ -360,7 +364,7 @@ impl TCPModule {
      */
     pub fn v_shutdown(&self, id: SocketID, how: ShutdownType) -> TCPResult<()> {
         // attempt to find socket associated with ID
-        let mut sock = self
+        let sock = self
             .sockets
             .get_socket_by_id(id)
             .context(BadFdSnafu { sock_id: id })?;
