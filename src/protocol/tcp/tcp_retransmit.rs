@@ -166,11 +166,15 @@ pub fn check_syn_retransmissions(sock: &Socket) -> RtxState {
 pub fn zero_probe_retransmission(sock: &Socket) -> RtxState {
     // if not zero probing anymore, fully acked
     if !sock.is_zero_probing() {
+        println!("no longer zp");
+
         return RtxState::FullyAcked;
     }
     // clear rtx_q; if empty, fully acked
     sock.clear_retransmissions();
     if sock.rtx_q_empty() {
+        println!("rtx_q cleared");
+
         return RtxState::FullyAcked;
     }
 

@@ -226,6 +226,9 @@ pub fn make_segment_loop(
                     // send SYN+ACK back
                     if sock.send_syn_ack(snd.una, rcv.nxt, rcv.wnd).is_ok() {}
 
+                    // TODO: hopefully this fixes my deadlock
+                    drop(snd);
+                    drop(rcv);
                     // insert into pending sockets; we're waiting for an ACK
                     pending_socks.insert(sock_entry.clone());
                 }
@@ -290,15 +293,19 @@ pub fn make_segment_loop(
                 // if in last ACK, delete da boi
                 if snd.nxt == ack_no && tcp_state == TCPState::LastAck {
                     // remove from pending sockets; we've been noticed senpai uWu~
+                    // XXX: will this deadlock?
                     pending_socks.remove(&sock_entry);
                     // TODO: other cleanup
                     sockets.delete_socket_by_entry(&sock_entry);
+                    continue;
                 }
 
                 let r_closed = sock.r_closed();
                 let old_una = snd.una;
                 // determine if we should send more segments
                 let mut wnd_update = false;
+                // determine if we should add to pending queue
+                let mut is_pending = false;
 
                 // if ACK in [SND.UNA ... SND.UNA + SND.NXT] and not r_closed, update send window
                 if snd.in_una_nxt_window(ack_no) && !r_closed {
@@ -366,8 +373,8 @@ pub fn make_segment_loop(
                                 sock.send_bytes(vec![end], snd.nxt, rcv.nxt, rcv.wnd).ok();
                                 // update snd.nxt
                                 snd.nxt += 1;
-                                // insert into pending sockets
-                                pending_socks.insert(sock_entry.clone());
+                                // mark as pending
+                                is_pending = true;
                             } else {
                                 // if None, we'll send an ack later
                                 should_send_ack = true;
@@ -386,10 +393,10 @@ pub fn make_segment_loop(
                     // if in FinWait1, move to TimeWait, FinWait2, or Closing depending on value
                     TCPState::FinWait1 => {
                         if fin && snd.nxt == ack_no {
-                            // initialize timer, and insert into pending socks
-                            sock.start_time_wait();
-                            pending_socks.insert(sock_entry.clone());
                             sock.set_tcp_state(TCPState::TimeWait);
+                            // initialize timer, and mark to insert into pending socks
+                            sock.start_time_wait();
+                            is_pending = true;
                         } else if snd.nxt == ack_no {
                             sock.set_tcp_state(TCPState::FinWait2);
                         } else if fin {
@@ -406,7 +413,7 @@ pub fn make_segment_loop(
                             sock.set_tcp_state(TCPState::TimeWait);
                             // initialize timer, and insert into pending socks
                             sock.start_time_wait();
-                            pending_socks.insert(sock_entry.clone());
+                            is_pending = true;
                         }
                     }
                     // if in Closing, move to TimeWait
@@ -416,7 +423,7 @@ pub fn make_segment_loop(
                             sock.set_tcp_state(TCPState::TimeWait);
                             // initialize timer, and insert into pending socks
                             sock.start_time_wait();
-                            pending_socks.insert(sock_entry.clone());
+                            is_pending = true;
                         } else {
                             println!("[segment_loop] SND.NXT != ACK_NO for Closing");
                         }
@@ -429,10 +436,17 @@ pub fn make_segment_loop(
                     // get segments and send
                     let segments = snd.get_una_segments(MSS);
                     sock.send_segments(segments, Some((rcv.nxt, rcv.wnd))).ok();
-                    // insert into pending_socks, as there's stuff to retransmit potentially
-                    pending_socks.insert(sock_entry.clone());
                 } else if should_send_ack {
                     sock.send_ack(snd.nxt, rcv.nxt, rcv.wnd).ok();
+                }
+
+                // TODO: hopefully this fixes my deadlock
+                drop(snd);
+                drop(rcv);
+
+                // if necessary, insert into pending_socks
+                if is_pending {
+                    pending_socks.insert(sock_entry.clone());
                 }
             }
         }
