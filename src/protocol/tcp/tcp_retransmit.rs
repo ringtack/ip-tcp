@@ -16,7 +16,7 @@ pub enum RtxState {
 }
 
 const SYN_RETRANSMIT_LIMIT: usize = 3;
-const DATA_RETRANSMIT_LIMIT: usize = 10;
+const DATA_RETRANSMIT_LIMIT: usize = 15;
 const ZP_RETRANSMIT_LIMIT: usize = 20;
 
 const MAX_EXP_TIME: u64 = 1200; // in MS
@@ -36,83 +36,79 @@ pub fn check_retransmission(
     sockets: SocketTable,
     pending_socks: Arc<DashSet<SocketEntry>>,
 ) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        loop {
-            let mut to_delete = HashSet::new();
-            // iterate pending_socks
-            for sock_entry in pending_socks.iter() {
-                let sock_entry = sock_entry.key().clone();
-                let sock = sockets.get_socket_by_entry(&sock_entry).unwrap();
+    thread::spawn(move || loop {
+        let mut to_delete = HashSet::new();
+        // iterate pending_socks
+        for sock_entry in pending_socks.iter() {
+            let sock_entry = sock_entry.key().clone();
+            let sock = sockets.get_socket_by_entry(&sock_entry).unwrap();
 
-                match sock.get_tcp_state() {
-                    TCPState::SynSent | TCPState::SynRcvd => {
-                        match check_syn_retransmissions(&sock) {
-                            RtxState::FullyAcked => {
-                                println!(
-                                    "{}:{} fully established connection!",
-                                    *sock.src_sock.ip(),
-                                    sock.src_sock.port()
-                                );
-                                to_delete.insert(sock_entry.clone());
-                            }
-                            RtxState::MaxRetransmissions => {
-                                println!(
+            match sock.get_tcp_state() {
+                TCPState::SynSent | TCPState::SynRcvd => match check_syn_retransmissions(&sock) {
+                    RtxState::FullyAcked => {
+                        println!(
+                            "{}:{} fully established connection!",
+                            *sock.src_sock.ip(),
+                            sock.src_sock.port()
+                        );
+                        to_delete.insert(sock_entry.clone());
+                    }
+                    RtxState::MaxRetransmissions => {
+                        println!(
                                     "{}:{} failed to establish connection after {} re-transmissions. Closing socket...",
                                     *sock.src_sock.ip(),
                                     sock.src_sock.port(),
                                     SYN_RETRANSMIT_LIMIT
                                 );
-                                to_delete.insert(sock_entry.clone());
-                                sockets.delete_socket_by_entry(&sock_entry);
-                            }
-                            _ => (),
-                        }
+                        to_delete.insert(sock_entry.clone());
+                        sockets.delete_socket_by_entry(&sock_entry);
                     }
-                    TCPState::Established
-                    | TCPState::FinWait1
-                    | TCPState::CloseWait
-                    | TCPState::Closing => {
-                        let rtx_state = if sock.is_zero_probing() {
-                            zero_probe_retransmission(&sock)
-                        } else {
-                            check_data_retransmission(&sock)
-                        };
-                        // handle state after transmitting
-                        match rtx_state {
-                            RtxState::FullyAcked => {
-                                println!(
-                                    "{}:{} is fully acknowledged!",
-                                    *sock.src_sock.ip(),
-                                    sock.src_sock.port()
-                                );
-                                to_delete.insert(sock_entry.clone());
-                            }
-                            RtxState::MaxRetransmissions => {
-                                println!(
+                    _ => (),
+                },
+                TCPState::Established
+                | TCPState::FinWait1
+                | TCPState::CloseWait
+                | TCPState::Closing => {
+                    let rtx_state = if sock.is_zero_probing() {
+                        zero_probe_retransmission(&sock)
+                    } else {
+                        check_data_retransmission(&sock)
+                    };
+                    // handle state after transmitting
+                    match rtx_state {
+                        RtxState::FullyAcked => {
+                            println!(
+                                "{}:{} is fully acknowledged!",
+                                *sock.src_sock.ip(),
+                                sock.src_sock.port()
+                            );
+                            to_delete.insert(sock_entry.clone());
+                        }
+                        RtxState::MaxRetransmissions => {
+                            println!(
                                     "{}:{} failed to establish connection after {} re-transmissions. Closing socket...",
                                     *sock.src_sock.ip(),
                                     sock.src_sock.port(),
                                     DATA_RETRANSMIT_LIMIT
                                 );
-                                to_delete.insert(sock_entry.clone());
-                                sockets.delete_socket_by_entry(&sock_entry);
-                            }
-                            _ => (),
+                            to_delete.insert(sock_entry.clone());
+                            sockets.delete_socket_by_entry(&sock_entry);
                         }
+                        _ => (),
                     }
-                    TCPState::TimeWait => (),
-                    TCPState::LastAck => (),
-                    _ => (),
                 }
+                TCPState::TimeWait => (),
+                TCPState::LastAck => (),
+                _ => (),
             }
-
-            // remove all the bois that are done
-            for sock_entry in to_delete {
-                pending_socks.remove(&sock_entry);
-            }
-
-            thread::sleep(Duration::from_millis(1));
         }
+
+        // remove all the bois that are done
+        for sock_entry in to_delete {
+            pending_socks.remove(&sock_entry);
+        }
+
+        thread::sleep(Duration::from_micros(1000));
     })
 }
 
@@ -141,10 +137,8 @@ pub fn check_syn_retransmissions(sock: &Socket) -> RtxState {
         } else {
             // check if timer exceeds 2^(counter)[s]
             let timeout = Duration::from_secs(2_u64.pow(rtx_seg.counter as u32));
-            if timeout <= rtx_seg.send_time.elapsed() {
-                println!("timed out; retransmitting");
-
-                // if time elapsed > timeout, retransmit
+            if rtx_seg.send_time.elapsed() > timeout {
+                // println!("timed out; retransmitting");
                 sock.send(rtx_seg.segment, true, rtx_seg.counter + 1).ok();
             } else {
                 // println!("still pending");
@@ -165,15 +159,18 @@ pub fn check_syn_retransmissions(sock: &Socket) -> RtxState {
  */
 pub fn zero_probe_retransmission(sock: &Socket) -> RtxState {
     // if not zero probing anymore, fully acked
-    if !sock.is_zero_probing() {
-        println!("no longer zp");
+    let zp_time = match *sock.zero_probe.lock().unwrap() {
+        Some(zp_time) => zp_time,
+        None => {
+            // println!("no longer zp");
+            return RtxState::FullyAcked;
+        }
+    };
 
-        return RtxState::FullyAcked;
-    }
     // clear rtx_q; if empty, fully acked
     sock.clear_retransmissions();
     if sock.rtx_q_empty() {
-        println!("rtx_q cleared");
+        // println!("rtx_q cleared");
 
         return RtxState::FullyAcked;
     }
@@ -189,7 +186,7 @@ pub fn zero_probe_retransmission(sock: &Socket) -> RtxState {
     let mut segment = sock.rtx_q_pop().unwrap();
     // manually set counter and time sent... this is so janky
     segment.counter = counter;
-    segment.send_time = sock.zero_probe.lock().unwrap().unwrap();
+    segment.send_time = zp_time;
 
     // if not timeout, just reappend
     if !is_segment_timeout(&segment, &sock.get_rto()) {
@@ -234,7 +231,7 @@ pub fn check_data_retransmission(sock: &Socket) -> RtxState {
             return RtxState::MaxRetransmissions;
         }
 
-        println!("retransmitting");
+        // println!("retransmitting data");
 
         // otherwise, retransmit with increased counter
         sock.send(segment.segment, true, segment.counter + 1).ok();

@@ -4,7 +4,10 @@ use std::{
     cmp::{max, min},
     collections::VecDeque,
     fmt,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Condvar,
+    },
     time::{Duration, Instant},
 };
 
@@ -13,12 +16,14 @@ use crate::protocol::{
     tcp::{control_buffers::*, tcp_errors::*, *},
 };
 
-pub const MSS: usize = 4; // 536; // RFC 1122, p. 86 says "MUST" default of 536
-pub const MSL: u64 = 10; // in S
+pub const MSS: usize = 1024; // 536; // RFC 1122, p. 86 says "MUST" default of 536
+pub const MSL: u64 = 10; // in secs
 pub const ALPHA: f64 = 0.85;
 pub const BETA: f64 = 1.5;
 pub const LBOUND: u64 = 10; // in MS
 pub const UBOUND: u64 = 2000; // in MS
+                              //
+                              // pub const SND_THRESHOLD: usize = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TCPState {
@@ -36,7 +41,10 @@ pub enum TCPState {
 
 impl TCPState {
     pub fn readable(&self) -> bool {
-        *self == TCPState::Established || *self == TCPState::FinWait1 || *self == TCPState::FinWait2
+        *self == TCPState::Established
+            || *self == TCPState::FinWait1
+            || *self == TCPState::FinWait2
+            || *self == TCPState::CloseWait
     }
 
     pub fn writable(&self) -> bool {
@@ -115,6 +123,8 @@ pub struct Socket {
     pub time_sent: Arc<Mutex<Option<Instant>>>,
     // queue for retransmitting segmants
     pub rtx_q: Arc<Mutex<VecDeque<SegmentEntry>>>,
+    // to track when it's done
+    pub pending: Arc<(Mutex<()>, Condvar)>,
 
     // Send/Receive Control Structs
     pub snd: Arc<Mutex<SendControlBuffer>>,
@@ -144,6 +154,7 @@ impl Socket {
             zp_timeout: Arc::new(AtomicU32::new(0)),
             prtt: Arc::new(Mutex::new(Duration::from_millis(LBOUND))),
             time_sent: Arc::new(Mutex::new(None)),
+            pending: Arc::new((Mutex::new(()), Condvar::new())),
             //
             rtx_q: Arc::new(Mutex::new(VecDeque::new())),
             //
@@ -160,76 +171,82 @@ impl Socket {
      * Receives data from the other end of the connection.
      */
     pub fn recv_buffer(&self, buf: &mut [u8], n_bytes: usize) -> TCPResult<usize> {
-        //// Should already be done in v_read!
-
-        // if closed, automatically return 0
-        // if self.r_closed.load(Ordering::Relaxed) {
-        // return Ok(0);
-        // }
-
-        // // if invalid state, immediately return
-        // let tcp_state = self.get_tcp_state();
-        // ensure!(
-        // tcp_state.readable(),
-        // InvalidStateSnafu {
-        // tcp_state,
-        // command: String::from("RECV"),
-        // }
-        // );
-
         let mut rcv = self.rcv.lock().unwrap();
 
-        // return number of bytes read
-        match rcv.read(buf, n_bytes) {
-            Some(n) => Ok(n),
-            None => NoDataSnafu {
-                count: 0_usize,
-                num_bytes: n_bytes,
+        // attempt to read n_bytes
+        let mut n_read = 0;
+        while n_read == 0 {
+            match rcv.read(buf, n_bytes) {
+                Some(n) => {
+                    n_read += n;
+                    // TODO: flush as many out of order packets as possible, or do I do it
+                    // elsewhere?
+                }
+                None => {
+                    // block until receive notification
+                    let cv = rcv.cv.clone();
+                    rcv = cv.wait(rcv).unwrap();
+                    let tcp_state = self.get_tcp_state();
+                    // if socket closed, return with failure
+                    if !tcp_state.readable() || tcp_state == TCPState::CloseWait && rcv.len() == 0 {
+                        return InvalidStateSnafu {
+                            tcp_state,
+                            command: String::from("RECV"),
+                        }
+                        .fail();
+                    }
+                }
             }
-            .fail(),
         }
+
+        Ok(n_read)
     }
 
     /**
      * Sends a created segment to other end of the connection.
      */
     pub fn send_buffer(&self, buf: &[u8]) -> TCPResult<usize> {
-        //// Should already be done in v_write!
-
-        // if invalid state, immediately return
-        // let tcp_state = self.get_tcp_state();
-        // ensure!(
-        // tcp_state.writable(),
-        // InvalidStateSnafu {
-        // tcp_state,
-        // command: String::from("SEND"),
-        // }
-        // );
-
         let mut snd = self.snd.lock().unwrap();
-        let old_len = snd.len();
 
         // attempt to write to circular buffer
-        // TODO: move condition variable from SCB/RCB into socket, then signal if full here
-        snd.write(buf)?;
-
-        // if Nagle's algorithm is enabled, follow algorithm
-        // Reference: RFC 1122, p. 98-99
-        if self.nagles.load(Ordering::Relaxed) {
-            // if:
-            // - amount of data in queue >= MSS
-            // - there was no unconfirmed data, automatically send
-            if snd.len() >= MSS || old_len == 0 {
-                let segments = snd.get_una_segments(MSS);
-                self.send_segments(segments, None).unwrap();
-            } // else { // otherwise, just buffer, which we've already done with snd.write }
-        } else {
-            // if no Nagle's, just send immediately
-            let segments = snd.get_una_segments(MSS);
+        let n_bytes = buf.len();
+        let mut n_written = 0;
+        while n_written < n_bytes {
+            let n_to_write = min(n_bytes - n_written, snd.space_left());
+            match snd.write(&buf[n_written..(n_written + n_to_write)]) {
+                Ok(n) => {
+                    n_written += n;
+                }
+                Err(_) => {
+                    // block until receive notification (i.e. circular buffer clears a little)
+                    let cv = snd.cv.clone();
+                    snd = cv.wait(snd).unwrap();
+                }
+            }
+            // Send bytes that have been written [TODO: check if snd.len() > 0?]
+            let segments = snd.get_nxt_segments(MSS);
             self.send_segments(segments, None).unwrap();
         }
 
-        Ok(buf.len())
+        // eprintln!("[send_buffer] done writing");
+
+        // if Nagle's algorithm is enabled, follow algorithm
+        // Reference: RFC 1122, p. 98-99
+        // if self.nagles.load(Ordering::Relaxed) {
+        // // if:
+        // // - amount of data in queue >= MSS
+        // // - there was no unconfirmed data, automatically send
+        // if snd.len() >= MSS || old_len == 0 {
+        // let segments = snd.get_una_segments(MSS);
+        // self.send_segments(segments, None).unwrap();
+        // } // else { // otherwise, just buffer, which we've already done with snd.write }
+        // } else {
+        // // if no Nagle's, just send immediately
+        // let segments = snd.get_una_segments(MSS);
+        // self.send_segments(segments, None).unwrap();
+        // }
+
+        Ok(n_written)
     }
 
     /**
@@ -237,7 +254,7 @@ impl Socket {
      */
     pub fn send_bytes(&self, bytes: Vec<u8>, seq: u32, ack: u32, wnd: u16) -> Result<()> {
         // mark time of transmission
-        self.set_time_sent();
+        // self.set_time_sent();
 
         // make segment
         let segment = TCPSegment::new(self.src_sock, self.dst_sock, seq, ack, wnd, bytes);
@@ -255,15 +272,15 @@ impl Socket {
         ack_wnd: Option<(u32, u16)>,
     ) -> Result<()> {
         // mark start of transmission
-        self.set_time_sent();
+        // self.set_time_sent();
 
         // for each segment, create TCP segment/IP packet
         for (seg_seq, seg_data) in segments {
-            println!(
-                "Sending segment with SEQ {} and size {}",
-                seg_seq,
-                seg_data.len()
-            );
+            // println!(
+            // "Sending segment with SEQ {} and size {}",
+            // seg_seq,
+            // seg_data.len()
+            // );
 
             let (ack, win) = match ack_wnd {
                 Some((ack, win)) => (ack, win),
@@ -316,7 +333,7 @@ impl Socket {
      * Sends an ACK segment to other end of connection. [TODO: piggyback off data, if possible]
      */
     pub fn send_ack(&self, snd_nxt: u32, rcv_nxt: u32, win_sz: u16) -> Result<()> {
-        println!("[{}] sending ACK to {}...", self.src_sock, self.dst_sock);
+        // println!("[{}] sending ACK to {}...", self.src_sock, self.dst_sock);
         // create TCP segment/IP packet
         let segment = TCPSegment::new(
             self.src_sock,
@@ -387,6 +404,13 @@ impl Socket {
     /**
      * Gets the number of bytes available in the recv buffer.
      */
+    pub fn get_snd_len(&self) -> usize {
+        self.snd.lock().unwrap().len()
+    }
+
+    /**
+     * Gets the number of bytes available in the recv buffer.
+     */
     pub fn get_rcv_len(&self) -> usize {
         self.rcv.lock().unwrap().len()
     }
@@ -411,8 +435,7 @@ impl Socket {
      * Set time sent to now.
      */
     pub fn set_time_sent(&self) {
-        let mut time_sent = self.time_sent.lock().unwrap();
-        *time_sent = Some(Instant::now());
+        *self.time_sent.lock().unwrap() = Some(Instant::now());
     }
 
     /**

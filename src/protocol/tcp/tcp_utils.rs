@@ -1,6 +1,6 @@
 use dashmap::DashSet;
 
-use std::{thread, time::Instant};
+use std::thread;
 
 use crate::protocol::{
     network::{ip_packet::*, InternetModule},
@@ -108,7 +108,7 @@ pub fn make_accept_loop(
             let src_port = syn_seg.header.destination_port; //find_valid_port(&dst_sock, src_addr, &socket_table);
             let src_sock = SocketAddrV4::new(src_addr, src_port);
 
-            println!(
+            eprintln!(
                 "[accept_loop] Received SYN from {}; opening socket on {}...",
                 dst_sock, src_sock
             );
@@ -208,12 +208,16 @@ pub fn make_segment_loop(
                 if ack {
                     snd.set_una(seq_no, ack_no, seg_wnd);
 
-                    println!(
+                    eprintln!(
                         "[{}] received SYN+ACK! establishing connection to {}.",
                         sock.src_sock, sock.dst_sock
                     );
                     // update TCP state
                     sock.set_tcp_state(TCPState::Established);
+
+                    // notify waiting CV
+                    let (_, cv) = &*sock.pending.clone();
+                    cv.notify_all();
 
                     // send ACK back
                     sock.send_ack(snd.nxt, rcv.nxt, rcv.wnd).ok();
@@ -239,7 +243,7 @@ pub fn make_segment_loop(
 
             // check acceptability of segment
             if !rcv.acceptable_seg(seq_no, seg_len) {
-                eprintln!("[segment_loop] unacceptable segment; dropping...");
+                // eprintln!("[segment_loop] unacceptable segment; dropping...");
                 // if any of those conditions fail, then not acceptable, so send ACK back
                 if sock.send_ack(snd.nxt, rcv.nxt, rcv.wnd).is_ok() {}
                 // drop packet
@@ -250,7 +254,7 @@ pub fn make_segment_loop(
             if syn {
                 // if packet in window, error, so drop
                 if rcv.in_window(seq_no) {
-                    eprintln!("[segment_loop] SYN in RCV window illegal, dropping...");
+                    // eprintln!("[segment_loop] SYN in RCV window illegal, dropping...");
 
                     // TODO: cleanup:
                     // - flush all queues
@@ -277,11 +281,15 @@ pub fn make_segment_loop(
                     // update UNA & co. values
                     snd.set_una(seq_no, ack_no, seg_wnd);
 
-                    println!(
+                    eprintln!(
                         "[{}] Established connection to {}",
                         sock.src_sock, sock.dst_sock
                     );
                     sock.set_tcp_state(TCPState::Established);
+
+                    // notify waiting CV
+                    let (_, cv) = &*sock.pending.clone();
+                    cv.notify_all();
 
                     // remove from pending queue
                     // pending_socks.remove(&sock_entry);
@@ -309,9 +317,18 @@ pub fn make_segment_loop(
 
                 // if ACK in [SND.UNA ... SND.UNA + SND.NXT] and not r_closed, update send window
                 if snd.in_una_nxt_window(ack_no) && !r_closed {
+                    // eprintln!("[segment_loop] updating window...");
                     snd.wnd = seg_wnd;
                     wnd_update = true;
                 }
+
+                // eprintln!(
+                // "[segment_loop] data.len(): {}, ack: {}, una: {}, nxt: {}",
+                // tcp_seg.data.len(),
+                // ack_no,
+                // snd.una,
+                // snd.nxt
+                // );
 
                 // if ACK in (SND.UNA ... SND.UNA + SND.NXT], update send variables
                 if ack_no != old_una && snd.in_una_nxt_window(ack_no) && !r_closed {
@@ -320,13 +337,13 @@ pub fn make_segment_loop(
                         snd.len += 1;
                     }
                     snd.set_una(seq_no, ack_no, seg_wnd);
-                }
 
-                println!(
-                    "[segment_loop] data.len(): {}, ack: {}",
-                    tcp_seg.data.len(),
-                    ack_no
-                );
+                    // if len -> 0, notify CV
+                    if snd.len == 0 {
+                        let (_, cv) = &*sock.pending.clone();
+                        cv.notify_all();
+                    }
+                }
 
                 // if not fin/still can read and has data:
                 if (!fin || tcp_state.readable()) && !tcp_seg.data.is_empty() {
@@ -338,11 +355,14 @@ pub fn make_segment_loop(
 
                 // if fin and should be next RCV, update rcv.nxt
                 if fin && rcv.nxt == seq_no {
+                    eprintln!("[segment_loop] got fin");
                     rcv.nxt += 1;
                 }
 
                 // decide whether to send more data, or just ack
-                let mut send_more = !snd.is_empty() && snd.wnd > 0;
+                let off = snd.nxt as usize - if tcp_state.writable() { 0 } else { 1 };
+                let mut send_more = snd.bytes_left(off % snd.capacity()) > 0 && snd.wnd > 0;
+
                 // before we update, record if we should send an ack back
                 let mut should_send_ack =
                     (fin && tcp_state.should_send_ack()) || !tcp_seg.data.is_empty();
@@ -351,24 +371,31 @@ pub fn make_segment_loop(
                 if wnd_update {
                     // if window > 0 and zero probing, stop and potentially start sending
                     if seg_wnd > 0 && sock.is_zero_probing() {
-                        println!("stopping zero probing...");
+                        eprintln!("[segment_loop] stopping zero probing...");
 
                         sock.stop_zero_probing();
+                        // eprintln!("[segment_loop] snd.is_empty: {}", snd.is_empty());
                     } else if seg_wnd == 0 {
                         // otherwise: can't send any, window is poopoo
                         send_more = false;
                         // if already zero probing, just increment zp_counter
                         if sock.is_zero_probing() {
                             sock.inc_zp_counter();
-                        } else {
-                            println!("starting zero probing...");
 
-                            // otherwise, initialize zero probing
-                            sock.start_zero_probing();
-                            // clear retransmission queue; shouldn't retransmit anything
-                            sock.rtx_q_clear();
+                            eprintln!("[segment_loop] already zero-probing");
+                            // XXX: should I need to add to pending here?
+                            is_pending = true;
+                        } else {
                             // get byte from end, if applicable
                             if let Some(end) = snd.get_end() {
+                                eprintln!("[segment_loop] starting zero probing...");
+
+                                // TODO: check this. I think we only need to start zero probing if
+                                // there are bytes at the end
+                                // initialize zero probing
+                                sock.start_zero_probing();
+                                // clear retransmission queue; shouldn't retransmit anything
+                                sock.rtx_q_clear();
                                 // end_byte: u8, SEQ, ACK, WND
                                 sock.send_bytes(vec![end], snd.nxt, rcv.nxt, rcv.wnd).ok();
                                 // update snd.nxt
@@ -376,6 +403,11 @@ pub fn make_segment_loop(
                                 // mark as pending
                                 is_pending = true;
                             } else {
+                                eprintln!(
+                                    "[segment_loop] nothing left; snd.is_empty(): {}",
+                                    snd.is_empty()
+                                );
+
                                 // if None, we'll send an ack later
                                 should_send_ack = true;
                             }
@@ -388,6 +420,8 @@ pub fn make_segment_loop(
                     TCPState::Established => {
                         if fin {
                             sock.set_tcp_state(TCPState::CloseWait);
+                            // if move to close wait, notify recv CV; no more reading
+                            rcv.cv.notify_all();
                         }
                     }
                     // if in FinWait1, move to TimeWait, FinWait2, or Closing depending on value
@@ -397,15 +431,18 @@ pub fn make_segment_loop(
                             // initialize timer, and mark to insert into pending socks
                             sock.start_time_wait();
                             is_pending = true;
+                            // notify CV that we're done
+                            let (_, cv) = &*sock.pending.clone();
+                            cv.notify_all();
                         } else if snd.nxt == ack_no {
                             sock.set_tcp_state(TCPState::FinWait2);
                         } else if fin {
                             sock.set_tcp_state(TCPState::Closing);
                         } else {
-                            println!(
-                                "[segment_loop] SND.NXT != ACK_NO and not FIN for {}",
-                                tcp_state
-                            );
+                            // eprintln!(
+                            // "[segment_loop] SND.NXT != ACK_NO and not FIN for {}",
+                            // tcp_state
+                            // );
                         }
                     }
                     TCPState::FinWait2 => {
@@ -414,6 +451,9 @@ pub fn make_segment_loop(
                             // initialize timer, and insert into pending socks
                             sock.start_time_wait();
                             is_pending = true;
+                            // notify CV that we're done
+                            let (_, cv) = &*sock.pending.clone();
+                            cv.notify_all();
                         }
                     }
                     // if in Closing, move to TimeWait
@@ -424,18 +464,25 @@ pub fn make_segment_loop(
                             // initialize timer, and insert into pending socks
                             sock.start_time_wait();
                             is_pending = true;
+
+                            // notify CV that we're done
+                            let (_, cv) = &*sock.pending.clone();
+                            cv.notify_all();
                         } else {
-                            println!("[segment_loop] SND.NXT != ACK_NO for Closing");
+                            eprintln!("[segment_loop] SND.NXT != ACK_NO for Closing");
                         }
                     }
                     _ => (),
                 };
 
-                // if can send more data, do eet
+                // if can send more data, do it
                 if send_more {
-                    // get segments and send
-                    let segments = snd.get_una_segments(MSS);
+                    // get segments and send [XXX: una_segments or nxt_segments]
+                    let segments = snd.get_nxt_segments(MSS);
                     sock.send_segments(segments, Some((rcv.nxt, rcv.wnd))).ok();
+
+                    // we've sent something, so must be pending
+                    is_pending = true;
                 } else if should_send_ack {
                     sock.send_ack(snd.nxt, rcv.nxt, rcv.wnd).ok();
                 }
@@ -446,7 +493,7 @@ pub fn make_segment_loop(
 
                 // if necessary, insert into pending_socks
                 if is_pending {
-                    pending_socks.insert(sock_entry.clone());
+                    pending_socks.insert(sock_entry);
                 }
             }
         }
@@ -469,7 +516,6 @@ pub fn make_segment_loop(
  */
 pub fn make_tcp_handler(
     sockets: SocketTable,
-    pending_socks: Arc<DashSet<SocketEntry>>,
     accept_tx: Sender<IPPacket>,
     segment_tx: Sender<IPPacket>,
 ) -> Handler {
@@ -516,7 +562,7 @@ pub fn make_tcp_handler(
         };
 
         // update PRTT based on RTT, if applicable
-        sock.update_prtt(Instant::now());
+        // sock.update_prtt(Instant::now());
 
         // repackage IPPacket, since we'll need to forward
         let packet = IPPacket {
@@ -535,7 +581,7 @@ pub fn make_tcp_handler(
             } else if syn {
                 if accept_tx.send(packet).is_ok() {}
             } else {
-                println!("[tcp_handler] TODO: more informative error message");
+                eprintln!("[tcp_handler] TODO: more informative error message");
             }
         // } else if pending_socks.contains(&sock_entry) {
         // // TODO: should we offload to segment_loop, or just do checks here?

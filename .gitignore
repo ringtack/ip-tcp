@@ -16,3 +16,6 @@ node*
 .vagrant/
 .DS_Store
 
+# ignore input/output files
+in/
+out/

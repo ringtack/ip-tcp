@@ -8,11 +8,11 @@ use std::{
 };
 
 pub const SEQ_MAX: u32 = u32::MAX;
-// pub const BUFFER_SIZE: usize = u16::MAX as usize;
-pub const BUFFER_SIZE: usize = 16;
+pub const BUFFER_SIZE: usize = u16::MAX as usize;
+// pub const BUFFER_SIZE: usize = 16;
 pub const BSIZE_U32: u32 = BUFFER_SIZE as u32;
-// pub const WIN_SZ: u16 = u16::MAX;
-pub const WIN_SZ: u16 = 8;
+pub const WIN_SZ: u16 = u16::MAX;
+// pub const WIN_SZ: u16 = 8;
 
 /**
  * Control struct containing the send sequence space's variables.
@@ -50,7 +50,7 @@ pub struct SendControlBuffer {
     pub len: usize,
     head: usize,
     tail: usize,
-    cv: Condvar,
+    pub cv: Arc<Condvar>,
     pub una: u32,
     pub nxt: u32,
     pub wnd: u16,
@@ -67,7 +67,7 @@ impl SendControlBuffer {
             len: 0,
             head: 0,
             tail: 0,
-            cv: Condvar::new(),
+            cv: Arc::new(Condvar::new()),
             una: 0,
             nxt: 0,
             wnd: 0,
@@ -119,7 +119,7 @@ impl SendControlBuffer {
 
         assert_eq!((self.tail + self.len) % BUFFER_SIZE, self.head);
         // if end is past the head, nothing to send, so return
-        if (self.head < self.tail && (end_usize >= self.tail || end_usize < self.head))
+        if (self.head < self.tail && (self.tail <= end_usize || end_usize < self.head))
             || (self.tail <= end_usize && end_usize < self.head)
         {
             Some(self.buf[end_usize])
@@ -155,15 +155,19 @@ impl SendControlBuffer {
         // get starting position; if not in (2), return None
         let start = self.una as usize + off;
         let start_u32 = start as u32;
-        if !self.in_una_window(start_u32) || self.bytes_left(start % BUFFER_SIZE) == 0 {
+
+        let bytes_left = self.bytes_left(start % BUFFER_SIZE);
+        if !self.in_una_window(start_u32) || bytes_left == 0 {
+            // eprintln!("[get_off] no more to send");
             return None;
         }
 
         // shrink count to the number available
         let count = min(
-            min(count, self.bytes_left(start % BUFFER_SIZE)), // cannot get more than # of relevant bytes left
+            min(count, bytes_left), // cannot get more than # of relevant bytes left
             self.una_wnd_size() as usize - off, // or number of bytes left in RCV window
         );
+        // eprintln!("[SCB::get_off] count: {count}");
 
         // convert SEQ -> BUF space
         let start_buf = start % BUFFER_SIZE;
@@ -214,10 +218,12 @@ impl SendControlBuffer {
         };
 
         // compute number to read
-        let mut to_read = min(
+        let to_read = min(
             self.una_wnd_size() as usize - off, // bytes left in RCV'ing buffer's window
             self.bytes_left(start % BUFFER_SIZE), // relevant bytes left in actual buffer
         );
+
+        // eprintln!("[SCB::get_off_segments] to_read: {}", to_read);
 
         let mut n_read = 0;
         // while there's still stuff to read
@@ -235,15 +241,20 @@ impl SendControlBuffer {
             let (seg_seq, n_got) =
                 match self.get_off(off + n_read, segment.as_mut_slice(), seg_size) {
                     Some((ss, ng)) => (ss, ng),
-                    None => break, // theoretically, should never reach here
+                    None => {
+                        // eprintln!("breaking");
+                        break;
+                    } // theoretically, should never reach here
                 };
 
             // resize to actual amount
             segment.resize(n_got, 0);
             // update control values
             n_read += n_got;
-            to_read -= n_got;
+            // to_read -= n_got;
             segments.push((seg_seq, segment));
+
+            // eprintln!("[SCB::get_off_segments] n_read: {n_read}");
         }
 
         // update SND.NXT to the amount read (which should be == end)
@@ -256,7 +267,7 @@ impl SendControlBuffer {
      * Fills the circular buffer with the specified slice of data. If not enough space, returns
      * without filling the buffer.
      *
-     * [Philosophy: reads should always work, since we want to send UP TO the end of the data in
+     * [Philosophy: reads should always work, since we want to send *UP TO* the end of the data in
      * the stream; however, when filling up the buffer, we don't want only part of our write
      * operation to succeed; the stream may be mangled.]
      *
@@ -311,7 +322,7 @@ impl SendControlBuffer {
         self.head = (self.head + msg_len) % BUFFER_SIZE;
         self.len += msg_len;
 
-        // println!("[SCB::write] {}", self);
+        // eprintln!("[SCB::write] {}", self);
 
         Ok(msg_len)
     }
@@ -373,13 +384,13 @@ impl SendControlBuffer {
         };
         self.una = ack_no;
         // only update nxt if more was ACKed
-        self.nxt = if diff > num_acked { ack_no } else { self.nxt };
+        self.nxt = if diff > num_acked { self.nxt } else { ack_no };
 
         // incremented last acknowledgment, so can "remove" from send buffer
         self.tail = self.una as usize % BUFFER_SIZE;
         self.len -= num_acked as usize;
 
-        // TODO: remove from retransmission queue [do this in handler]
+        // remove from retransmission queue [do this in handler]
 
         num_acked
     }
@@ -405,7 +416,7 @@ impl SendControlBuffer {
      */
     pub fn in_una_window(&self, ack_no: u32) -> bool {
         if self.snd_end() < self.una {
-            self.una <= ack_no && ack_no < SEQ_MAX || ack_no <= self.snd_end()
+            self.una <= ack_no && ack_no < SEQ_MAX || ack_no < self.snd_end()
         } else {
             self.una <= ack_no && ack_no < self.snd_end()
         }
@@ -465,11 +476,40 @@ impl SendControlBuffer {
      * Returns number of relevant bytes left in send buffer, from position. (BUF INDEX)
      */
     pub fn bytes_left(&self, b_pos: usize) -> usize {
-        if b_pos < self.head {
+        // eprintln!(
+        // "[SCB::bytes_left] head: {}, bpos: {}, tail: {}",
+        // self.head, b_pos, self.tail
+        // );
+
+        let bytes_left = if self.head == self.tail {
+            if self.len == 0 {
+                0
+            } else {
+                self.head + self.len - b_pos
+            }
+        // }
+        // let bytes_left = if b_pos == self.head {
+        // if self.head == self.tail {
+        // self.head + self.len - b_pos
+        // } else {
+        // 0
+        // }
+        } else if self.tail < self.head {
+            if b_pos < self.tail || b_pos >= self.head {
+                0
+            } else {
+                self.head - b_pos
+            }
+        } else if self.head <= b_pos && b_pos < self.tail {
+            0
+        } else if b_pos <= self.head {
             self.head - b_pos
         } else {
             self.head + BUFFER_SIZE - b_pos
-        }
+        };
+
+        // eprintln!("[SCB::bytes_left] {bytes_left}");
+        bytes_left
     }
 
     /**
@@ -534,7 +574,7 @@ pub struct RecvControlBuffer {
     pub len: usize,
     head: usize,
     tail: usize,
-    cv: Condvar,
+    pub cv: Arc<Condvar>,
     pub nxt: u32,
     pub wnd: u16,
     pub up: u16,
@@ -548,7 +588,7 @@ impl RecvControlBuffer {
             len: 0,
             head: 0,
             tail: 0,
-            cv: Condvar::new(),
+            cv: Arc::new(Condvar::new()),
             nxt: 0,
             wnd: WIN_SZ,
             up: 0,
@@ -611,22 +651,17 @@ impl RecvControlBuffer {
         let msg_len = data.len();
         let seg_end = seq_no + msg_len as u32;
 
-        // if previously empty, notify any waiters
-        if self.is_empty() {
-            self.cv.notify_all();
-        }
-
         // TODO: currently, only accepts ----[SEQ_NO...{RCV.NXT...SEG_END]...RCV.NXT+RCV.WND}----,
         // but ideally want more flexibility
         if !((seq_no <= self.nxt || self.nxt + self.wnd as u32 <= seq_no)
             && self.in_window(seg_end))
         {
-            eprintln!(
-                "[RCB::write] SEQ {} out of range [{}, {}]",
-                seq_no,
-                self.nxt,
-                self.nxt + self.wnd as u32
-            );
+            // eprintln!(
+            // "[RCB::write] SEQ {} out of range [{}, {}]",
+            // seq_no,
+            // self.nxt,
+            // self.nxt + self.wnd as u32
+            // );
             return Ok(0);
         }
 
@@ -654,6 +689,11 @@ impl RecvControlBuffer {
                 remaining_len: self.wnd as usize,
             }
         );
+
+        // if previously empty, notify any waiters
+        if self.is_empty() {
+            self.cv.notify_all();
+        }
 
         // check if can write without wrapping
         if self.head + msg_len < BUFFER_SIZE {

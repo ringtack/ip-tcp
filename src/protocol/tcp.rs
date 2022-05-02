@@ -285,17 +285,8 @@ impl TCPModule {
             .fail();
         }
 
-        // TODO: error handling
-        let mut n_read = 0;
-
-        while n_read == 0 {
-            match sock.recv_buffer(buf, n_bytes) {
-                Ok(n) => n_read = n,
-                Err(_) => thread::sleep(Duration::from_millis(100)),
-            }
-        }
-
-        Ok(n_read)
+        // propagate errors; specifically, will either give # bytes read, or error if closed
+        sock.recv_buffer(buf, n_bytes)
     }
 
     /**
@@ -309,8 +300,6 @@ impl TCPModule {
         if buf.is_empty() {
             return Ok(0);
         }
-
-        let n_bytes = buf.len();
 
         // attempt to find socket associated with ID
         let sock = self
@@ -326,23 +315,7 @@ impl TCPModule {
             .fail();
         }
 
-        let mut n_wrote = 0;
-        // TODO: error handling
-        while n_wrote < n_bytes {
-            let n_to_write = min(n_bytes - n_wrote, sock.get_space_left());
-
-            // TODO: if n_to_write == 0, wait on CV (or do within send_buffer)
-            // println!("[v_write] n_to_write: {}", n_to_write);
-
-            n_wrote += match sock.send_buffer(&buf[n_wrote..(n_wrote + n_to_write)]) {
-                Ok(n_written) => n_written,
-                Err(e) => {
-                    // eprintln!("[v_write] {}", e);
-                    thread::sleep(Duration::from_millis(100));
-                    0
-                }
-            }
-        }
+        let n_wrote = sock.send_buffer(buf)?;
 
         // insert into pending sockets
         self.pending_socks
@@ -418,6 +391,13 @@ impl TCPModule {
         self.sockets
             .get_socket_entry(id)
             .map(|sock_entry| (sock_entry.src_sock, sock_entry.dst_sock))
+    }
+
+    /**
+     * Get a socket from its ID.
+     */
+    pub fn get_sock(&self, id: SocketID) -> Option<Socket> {
+        self.sockets.get_socket_by_id(id)
     }
 
     /**
