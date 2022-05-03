@@ -1,8 +1,10 @@
-# IP/TCP[^1]
+# IP/TCP
 
-An RFC-compliant implementation of IP/TCP over a virtual UDP link layer, built with Rust.
+An RFC-compliant implementation of IP/TCP over a virtual UDP link layer, built with Rust[^1].
 
-[^1] Developed for Brown's CSCI1680: Computer Networks. See the TCP handout [here](https://cs.brown.edu/courses/csci1680/s22/content/tcp.pdf), and the IP handout [here](https://cs.brown.edu/courses/csci1680/s22/content/ip.pdf).
+[^1]: Developed for Brown's CSCI1680: Computer Networks.
+    - TCP handout: https://cs.brown.edu/courses/csci1680/s22/content/tcp.pdf
+    - IP handout: https://cs.brown.edu/courses/csci1680/s22/content/ip.pdf
 
 ## Usage
 
@@ -16,7 +18,7 @@ in the base directory (bless Cargo).
 
 To run the nodes, first convert a `.net` configuration file into individual node `.lnx`
 configuration files using `tools/net2lnx <.net file>`; this creates a virtual network connected by a
-UDP link layer abstraction (see the Appendix for more information). Given a `.lnx` file, run the
+UDP link layer abstraction (see the [Appendix](#Appendix) for more information). Given a `.lnx` file, run the
 node with
 
 ```bash
@@ -55,7 +57,6 @@ will halt some functionality:
       and the receiving window hits `0`, the socket _will not_ begin zero-probing (as there's nothing
       with which to probe). The receiving socket will never then update the sending socket about its
       increased window size, and the sending socket will remain forever stuck.
-
       The fix to this shouldn't be overly difficult, although may require some re-structuring within
       code. One naive option may be just to loop over every socket every so often, and if `SND.WND == 0`
       yet the send buffer is non-empty, send a zero-probe; this would be rather inefficient, but should
@@ -63,8 +64,8 @@ will halt some functionality:
       either the socket's `send_buffer()` method, or as a field (which could make the code slightly more
       ergonomic elsewhere anyways); this would require greater architectural adjustments, but could
       feasibly work.
-
-          - Fixed! I went with the first naive fix. Some day, I'll take a look at this again...
+      
+      Fixed! I went with the first naive fix. Some day, I'll take a look at this again...
 
 - [ ] Closing a socket via `v_close()`/`quit` (on the node) doesn't wait until re-transmission is
       completely done, and the other end of the socket cannot connect to the socket following a
