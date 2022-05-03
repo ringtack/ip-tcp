@@ -50,4 +50,4 @@ Results:
  [48] Time elapsed: 4.963686584s
  [49] Time elapsed: 14.208110353s
  [50] Time elapsed: 8.629300833s
-Average time: 7.76844033s	Total sent: 49MB	Rate: 126880.2228B/s
+Average time: 7.76844033s	Total sent: 49MB	Rate: 126880.2228[B/s]

@@ -569,7 +569,7 @@ impl Node {
                     }
                     let n_mb = n_bytes / 1_000_000;
                     let stats = format!(
-                        "Average time: {:?}\tTotal received: {}MB\tRate: {:.4}B/s",
+                        "Average time: {:?}\tTotal sent: {}MB\tRate: {:.4}[B/s]",
                         total_time.div_f64(n as f64),
                         n_mb,
                         (n_bytes as f64) / total_time.as_secs_f64()
