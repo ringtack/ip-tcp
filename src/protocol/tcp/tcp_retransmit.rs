@@ -77,6 +77,17 @@ pub fn check_retransmission(
                 | TCPState::CloseWait
                 | TCPState::Closing
                 | TCPState::LastAck => {
+                    if let RtxState::Expired = check_timewait_expiration(&sock) {
+                        println!(
+                            "{}:{} has waited over {}s (2 * MSL). Closing socket...",
+                            *sock.src_sock.ip(),
+                            sock.src_sock.port(),
+                            2 * MSL,
+                        );
+                        to_delete.insert(sock_entry.clone());
+                        sockets.delete_socket_by_entry(&sock_entry);
+                        continue;
+                    }
                     let rtx_state = if sock.is_zero_probing() {
                         zero_probe_retransmission(&sock)
                     } else {

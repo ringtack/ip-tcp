@@ -17,7 +17,7 @@ use crate::protocol::{
 };
 
 pub const MSS: usize = 1024; // 536; // RFC 1122, p. 86 says "MUST" default of 536
-pub const MSL: u64 = 5; // in secs
+pub const MSL: u64 = 15; // in secs
 pub const ALPHA: f64 = 0.85;
 pub const BETA: f64 = 1.5;
 pub const LBOUND: u64 = 10; // in MS

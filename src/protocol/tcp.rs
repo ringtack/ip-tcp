@@ -129,6 +129,10 @@ impl TCPModule {
             tcp_module.sockets.clone(),
             tcp_module.pending_socks.clone(),
         ));
+        tcp_module.thrs.push(dead_socket_handler(
+            tcp_module.sockets.clone(),
+            tcp_module.pending_socks.clone(),
+        ));
 
         tcp_module
     }
@@ -373,6 +377,8 @@ impl TCPModule {
                 // thread?]
                 sock.set_tcp_state(TCPState::LastAck);
             }
+            // mark for timeout
+            sock.start_time_wait();
         }
         // on read/both close:
         if how == ShutdownType::Read || how == ShutdownType::Both {

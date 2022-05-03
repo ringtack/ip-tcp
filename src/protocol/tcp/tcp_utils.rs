@@ -1,6 +1,6 @@
 use dashmap::DashSet;
 
-use std::thread;
+use std::{thread, time::Duration};
 
 use crate::protocol::{
     network::{ip_packet::*, InternetModule},
@@ -442,8 +442,7 @@ pub fn make_segment_loop(
                     TCPState::FinWait1 => {
                         if fin && snd.nxt == ack_no {
                             sock.set_tcp_state(TCPState::TimeWait);
-                            // initialize timer, and mark to insert into pending socks
-                            sock.start_time_wait();
+                            // mark to insert into pending socks
                             is_pending = true;
                             // notify CV that we're done
                             let (_, cv) = &*sock.pending.clone();
@@ -458,6 +457,8 @@ pub fn make_segment_loop(
                             // tcp_state
                             // );
                         }
+                        // start time wait
+                        sock.start_time_wait();
                     }
                     TCPState::FinWait2 => {
                         if fin {
@@ -513,6 +514,61 @@ pub fn make_segment_loop(
         }
 
         eprintln!("segment loop terminated.");
+    })
+}
+
+/**
+ * Revive potentially halted sockets through zero-probing.
+ */
+pub fn dead_socket_handler(
+    sockets: SocketTable,
+    pending_socks: Arc<DashSet<SocketEntry>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || loop {
+        for se_sock in sockets.iter() {
+            let (sock_entry, sock) = (se_sock.key().clone(), se_sock.value());
+            let (mut snd, rcv) = (sock.snd.lock().unwrap(), sock.rcv.lock().unwrap());
+            let mut is_pending = false;
+
+            // if socket:
+            // - is in writable state,
+            // - has non-empty send buffer,
+            // - has empty send window,
+            // - and is NOT zero-probing,
+            // then start zero probing.
+            if sock.get_tcp_state().writable()
+                && !snd.is_empty()
+                && snd.wnd == 0
+                && !sock.is_zero_probing()
+            {
+                eprintln!(
+                    "[dead_socket] reviving socket ({}:{})...",
+                    *sock.src_sock.ip(),
+                    sock.src_sock.port()
+                );
+
+                if let Some(end) = snd.get_end() {
+                    // initialize zero probing, and clear rtx queue
+                    sock.start_zero_probing();
+                    sock.rtx_q_clear();
+                    // send zero probe
+                    sock.send_bytes(vec![end], snd.nxt, rcv.nxt, rcv.wnd).ok();
+                    // update values
+                    snd.nxt += 1;
+                    is_pending = true;
+                } else {
+                    eprintln!("[dead_socket] should have end...");
+                }
+            }
+
+            // now, unlock and potentially add to pending
+            drop((snd, rcv));
+            if is_pending {
+                pending_socks.insert(sock_entry);
+            }
+        }
+        // shouldn't have to handle this often, so don't contest resources
+        thread::sleep(Duration::from_millis(1000));
     })
 }
 
