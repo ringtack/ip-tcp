@@ -16,6 +16,6 @@ node*
 .vagrant/
 .DS_Store
 
-# ignore input/output files
-in/
-out/
+# ignore input/output files [XXX: I'll keep them for now, for easier GitHub integration...]
+# in/
+# out/
