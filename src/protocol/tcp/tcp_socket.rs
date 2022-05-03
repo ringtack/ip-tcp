@@ -22,8 +22,8 @@ pub const ALPHA: f64 = 0.85;
 pub const BETA: f64 = 1.5;
 pub const LBOUND: u64 = 10; // in MS
 pub const UBOUND: u64 = 2000; // in MS
-                              //
-                              // pub const SND_THRESHOLD: usize = 10;
+
+pub const WAIT_TIMEOUT: u64 = 1; // in MS
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TCPState {
@@ -207,6 +207,7 @@ impl Socket {
      */
     pub fn send_buffer(&self, buf: &[u8]) -> TCPResult<usize> {
         let mut snd = self.snd.lock().unwrap();
+        let timeout = Duration::from_millis(WAIT_TIMEOUT);
 
         // attempt to write to circular buffer
         let n_bytes = buf.len();
@@ -220,7 +221,7 @@ impl Socket {
                 Err(_) => {
                     // block until receive notification (i.e. circular buffer clears a little)
                     let cv = snd.cv.clone();
-                    snd = cv.wait(snd).unwrap();
+                    snd = cv.wait_timeout(snd, timeout).unwrap().0;
                 }
             }
             // Send bytes that have been written [TODO: check if snd.len() > 0?]

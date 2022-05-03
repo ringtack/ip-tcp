@@ -171,7 +171,6 @@ pub fn zero_probe_retransmission(sock: &Socket) -> RtxState {
     sock.clear_retransmissions();
     if sock.rtx_q_empty() {
         // println!("rtx_q cleared");
-
         return RtxState::FullyAcked;
     }
 

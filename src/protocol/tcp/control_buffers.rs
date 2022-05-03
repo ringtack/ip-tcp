@@ -121,6 +121,7 @@ impl SendControlBuffer {
         // if end is past the head, nothing to send, so return
         if (self.head < self.tail && (self.tail <= end_usize || end_usize < self.head))
             || (self.tail <= end_usize && end_usize < self.head)
+            || (self.tail == self.head && self.len > 0 && end_usize == self.head)
         {
             Some(self.buf[end_usize])
         } else {

@@ -386,6 +386,23 @@ pub fn make_segment_loop(
                             // XXX: should I need to add to pending here?
                             is_pending = true;
                         } else {
+                            // eprintln!("[segment_loop] starting zero probing...");
+                            // let end_vec = match snd.get_end() {
+                            // Some(end) => vec![end],
+                            // None => vec![],
+                            // };
+                            // let end_exists = end_vec.len() as u32;
+
+                            // sock.start_zero_probing();
+                            // // clear retransmission queue; shouldn't retransmit anything
+                            // sock.rtx_q_clear();
+                            // // send bytes, and update nxt if applicable
+                            // sock.send_bytes(end_vec, snd.nxt, rcv.nxt, rcv.wnd).ok();
+                            // // update snd.nxt
+                            // snd.nxt += end_exists;
+                            // // mark as pending
+                            // is_pending = true;
+
                             // get byte from end, if applicable
                             if let Some(end) = snd.get_end() {
                                 eprintln!("[segment_loop] starting zero probing...");
@@ -403,10 +420,7 @@ pub fn make_segment_loop(
                                 // mark as pending
                                 is_pending = true;
                             } else {
-                                eprintln!(
-                                    "[segment_loop] nothing left; snd.is_empty(): {}",
-                                    snd.is_empty()
-                                );
+                                eprintln!("[segment_loop] nothing left; {}", snd);
 
                                 // if None, we'll send an ack later
                                 should_send_ack = true;
