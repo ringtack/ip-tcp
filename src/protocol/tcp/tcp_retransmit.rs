@@ -282,10 +282,8 @@ pub fn check_timewait_expiration(sock: &Socket) -> RtxState {
                 RtxState::Pending
             }
         }
-        None => {
-            eprintln!("TimeWait is None, but in TimeWait State.");
-            RtxState::Expired
-        }
+        // in this case, normal socket (i.e. Established/CloseWait in normal sending)
+        None => RtxState::Pending,
     }
 }
 

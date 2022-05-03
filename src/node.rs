@@ -2,16 +2,12 @@ use crate::protocol::link::READ_TIMEOUT;
 use crate::protocol::network::{
     ip_packet::*, network_interfaces::*, rip::*, routing_table::*, test::*, InternetModule,
 };
-use crate::protocol::tcp::{
-    tcp_socket::{ShutdownType, TCPState, MSS},
-    tcp_utils::make_tcp_handler,
-    *,
-};
+use crate::protocol::tcp::{tcp_socket::ShutdownType, tcp_utils::make_tcp_handler, *};
 
 use dashmap::DashMap;
 use std::{
     fs::File,
-    io::{prelude::*, BufRead, BufReader, BufWriter, Error, ErrorKind, Lines, Result},
+    io::{prelude::*, BufRead, BufReader, Error, ErrorKind, Lines, Result},
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     path::Path,
     process,
@@ -21,10 +17,11 @@ use std::{
         Arc,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const RWBUF_SIZE: usize = 5 * MSS;
+// directory to store send benchmark results
+pub const SEND_BENCHMARKS_DIR: &str = "benchmarks";
 
 /**
  * Struct representing the network layer interface.
@@ -364,86 +361,14 @@ impl Node {
                 };
 
                 let tcp_module = self.tcp_module.clone();
-                // create thread to send file
+                // spawn thread to send file
                 thread::spawn(move || {
-                    // connect to desired port
-                    let cid = match tcp_module.v_connect(addr, port) {
-                        Ok(c_id) => c_id,
-                        Err(e) => {
-                            eprintln!("{}", e);
-                            return;
-                        }
-                    };
-
-                    // busy loop until established; should really have a CV...
-                    let sock = tcp_module.get_sock(cid).unwrap();
-                    let (mtx, cv) = &*sock.pending;
-                    let mut m = mtx.lock().unwrap();
-                    while sock.get_tcp_state() != TCPState::Established {
-                        m = cv.wait(m).unwrap();
+                    if let Some((elapsed, total_bytes)) =
+                        tcp_module.send_file(addr, port, filename.clone())
+                    {
+                        println!("Sent {total_bytes}B from {filename} to {addr}:{port}!");
+                        println!("Time elapsed: {:?}", elapsed);
                     }
-                    drop(m);
-
-                    // now, open file for reading
-                    let f = match File::open(filename.clone()) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            eprintln!("{e}");
-                            tcp_module.v_shutdown(cid, ShutdownType::Both).ok();
-                            return;
-                        }
-                    };
-
-                    let mut f = BufReader::new(f);
-                    let mut buf = vec![0; RWBUF_SIZE];
-                    // for logging purposes
-                    let mut total_bytes = 0;
-                    let start = Instant::now();
-                    loop {
-                        match f.read(&mut buf) {
-                            Ok(n_read) => {
-                                // println!("writing {n_read} bytes");
-                                if n_read == 0 {
-                                    break;
-                                }
-                                total_bytes += n_read;
-                                match tcp_module.v_write(cid, &buf[..n_read]) {
-                                    Ok(_) => (),
-                                    Err(e) => {
-                                        // if got here, probably manually shut down
-                                        eprintln!("{e}");
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(_e) => {
-                                // eprintln!("{e}");
-                                tcp_module.v_shutdown(cid, ShutdownType::Both).ok();
-                                return;
-                            }
-                        }
-                    }
-                    // wait until we've sent all
-                    let mut m = mtx.lock().unwrap();
-                    while sock.get_snd_len() > 0 {
-                        m = cv.wait(m).unwrap();
-                    }
-                    drop(m);
-
-                    // now, we're done writing, so shut down writing side, if not already
-                    if sock.get_tcp_state().can_shutdown() {
-                        tcp_module.v_shutdown(cid, ShutdownType::Write).ok();
-                    }
-
-                    // wait until socket reaches TimeWait state
-                    let mut m = mtx.lock().unwrap();
-                    while sock.get_tcp_state() != TCPState::TimeWait {
-                        m = cv.wait(m).unwrap();
-                    }
-                    drop(m);
-
-                    println!("Sent {total_bytes}B from {filename} to {addr}:{port}!");
-                    println!("Time elapsed: {:?}", Instant::now().duration_since(start));
                 });
             }
             "rf" => {
@@ -464,68 +389,12 @@ impl Node {
                 let tcp_module = self.tcp_module.clone();
                 // create thread to receive file
                 thread::spawn(move || {
-                    // listen on the desired port
-                    let lid = match tcp_module.v_listen(0.into(), port) {
-                        Ok(l_id) => l_id,
-                        Err(e) => {
-                            eprintln!("{}", e);
-                            return;
-                        }
-                    };
-                    // accept a connection from the listening socket
-                    let cid = match tcp_module.v_accept(lid) {
-                        Ok(c_id) => c_id,
-                        Err(e) => {
-                            eprintln!("{e}");
-                            return;
-                        }
-                    };
-                    // once we've connected, close mr listener
-                    match tcp_module.v_shutdown(lid, ShutdownType::Both) {
-                        Ok(()) => (),
-                        Err(e) => {
-                            eprintln!("{e}");
-                            tcp_module.v_shutdown(cid, ShutdownType::Both).ok();
-                            return;
-                        }
-                    };
-                    // busy loop until established; should really have a CV...
-                    let sock = tcp_module.get_sock(cid).unwrap();
-                    let (mtx, cv) = &*sock.pending;
-                    let mut m = mtx.lock().unwrap();
-                    while sock.get_tcp_state() != TCPState::Established {
-                        m = cv.wait(m).unwrap();
+                    if let Some((elapsed, total_bytes)) =
+                        tcp_module.recv_file(port, filename.clone())
+                    {
+                        println!("Received {total_bytes}B into {filename} from 0.0.0.0:{port}!");
+                        println!("Time elapsed: {:?}", elapsed);
                     }
-                    drop(m);
-
-                    // now, open file for writing
-                    let f = match File::create(&filename) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            eprintln!("{e}");
-                            tcp_module.v_shutdown(cid, ShutdownType::Both).ok();
-                            return;
-                        }
-                    };
-                    let mut f = BufWriter::new(f);
-
-                    // to store what is read
-                    let mut buf = vec![0; RWBUF_SIZE];
-                    // for logging purposes
-                    let start = Instant::now();
-                    let mut total_bytes = 0;
-                    while let Ok(n_read) = tcp_module.v_read(cid, &mut buf, RWBUF_SIZE) {
-                        total_bytes += n_read;
-                        f.write_all(&buf[..n_read]).ok();
-                    }
-
-                    // now, we've received FIN, so shut down both
-                    tcp_module.v_shutdown(cid, ShutdownType::Both).ok();
-                    // flush file; we are done!
-                    f.flush().ok();
-
-                    println!("Received {total_bytes}B into {filename} from 0.0.0.0:{port}!");
-                    println!("Time elapsed: {:?}", Instant::now().duration_since(start));
                 });
             }
             "sd" => {
@@ -633,6 +502,170 @@ impl Node {
                     eprintln!("{}", e);
                 }
             }
+            "sf_benchmark" => {
+                if args.len() != 5 {
+                    eprintln!("Usage: \"sf_benchmark <filename> <ip> <port> <n>\"");
+                    return;
+                }
+
+                let filename = String::from(args[1]);
+                let addr = match str_2_ipv4(args[2]) {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return;
+                    }
+                };
+                let port = match args[3].parse::<u16>() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return;
+                    }
+                };
+                let n = match args[4].parse::<usize>() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return;
+                    }
+                };
+
+                // record results
+                let mut result_str = String::from("Results: \n");
+                let mut total_time = Duration::ZERO;
+                let mut n_bytes = 0;
+                let start = Instant::now();
+
+                let start_str = format!("Starting sendfile benchmark (sending \"{filename}\" {n} times to {addr}:{port})...");
+                println!("{}", start_str);
+                let tcp_module = self.tcp_module.clone();
+                // spawn thread to run in background
+                thread::spawn(move || {
+                    for i in 0..n {
+                        if let Some((elapsed, total_bytes)) =
+                            tcp_module.send_file(addr, port, filename.clone())
+                        {
+                            result_str.push_str(&format!(
+                                " [{}] Time elapsed: {:?}",
+                                i + 1,
+                                elapsed
+                            ));
+                            // check if SYN failed to connect
+                            if total_bytes == 0 {
+                                result_str.push_str(" [FAILED THREE-WAY HANDSHAKE]");
+                            }
+                            // pretty formatting
+                            if i != n - 1 {
+                                result_str.push('\n');
+                            }
+
+                            total_time += elapsed;
+                            n_bytes += total_bytes;
+                        } else {
+                            println!("The {}th send failed. Halting early...", i + 1);
+                            break;
+                        }
+                    }
+                    let n_mb = n_bytes / 1_000_000;
+                    let stats = format!(
+                        "Average time: {:?}\tTotal received: {}MB\tRate: {:.4}B/s",
+                        total_time.div_f64(n as f64),
+                        n_mb,
+                        (n_bytes as f64) / total_time.as_secs_f64()
+                    );
+
+                    // display results
+                    println!("{}", result_str);
+                    println!("{}", stats);
+                    println!("Total elapsed time: {:?}", start.elapsed());
+
+                    // log to file
+                    let time_str = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let results_file = format!("{}/send_{}.txt", SEND_BENCHMARKS_DIR, time_str);
+                    let mut results_file = File::create(results_file).unwrap();
+                    results_file.write_all(start_str.as_bytes()).ok();
+                    results_file.write_all(result_str.as_bytes()).ok();
+                    results_file.write(b"\n").ok();
+                    results_file.write_all(stats.as_bytes()).ok();
+                });
+            }
+            "rf_benchmark" => {
+                if args.len() != 4 {
+                    eprintln!("Usage: \"rf_benchmark <filename> <port> <n>\"");
+                    return;
+                }
+
+                let filename = String::from(args[1]);
+                let port = match args[2].parse::<u16>() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return;
+                    }
+                };
+                let n = match args[3].parse::<usize>() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return;
+                    }
+                };
+
+                // record results
+                let mut result_str = String::from("Results: \n");
+                let mut total_time = Duration::ZERO;
+                let mut n_bytes = 0;
+                let start = Instant::now();
+
+                println!("Starting recvfile benchmark (receiving {n} files on port {port})...");
+                let tcp_module = self.tcp_module.clone();
+                // spawn thread to run in background
+                thread::spawn(move || {
+                    for i in 0..n {
+                        let out_file = format!("{}_{}", filename, i);
+                        if let Some((elapsed, total_bytes)) =
+                            tcp_module.recv_file(port, out_file.clone())
+                        {
+                            result_str.push_str(&format!(
+                                " [{}] Time elapsed: {:?} [out file: {}]",
+                                i + 1,
+                                elapsed,
+                                out_file
+                            ));
+                            // check if SYN failed to connect
+                            if total_bytes == 0 {
+                                result_str.push_str(" [FAILED THREE-WAY HANDSHAKE]");
+                            }
+                            // pretty formatting
+                            if i != n - 1 {
+                                result_str.push('\n');
+                            }
+
+                            total_time += elapsed;
+                            n_bytes += total_bytes;
+                        } else {
+                            println!("The {}th recv failed. Halting early...", i + 1);
+                            break;
+                        }
+                    }
+                    let n_mb = n_bytes / 1_000_000;
+                    let stats = format!(
+                        "Average time: {:?}\tTotal received: {}MB\tRate: {:.4}B/s",
+                        total_time.div_f64(n as f64),
+                        n_mb,
+                        (n_bytes as f64) / total_time.as_secs_f64()
+                    );
+
+                    // display results
+                    println!("{}", result_str);
+                    println!("{}", stats);
+                    println!("Total elapsed time: {:?}", start.elapsed());
+                });
+            }
             "" => (),
             _ => eprintln!("Error: command not found. Help menu:\n{}", HELP_MSG),
         }
@@ -710,4 +743,9 @@ const HELP_MSG: &str = " help (h)        : Print this list of commands.
  send [ip] [protocol] [payload] : sends payload with protocol=protocol to virtual-ip ip
  up [integer]   : Bring an interface \"up\" (it must be an existing interface, probably one you brought down)
  down [integer] : Bring an interface \"down\"
+
+ ==================== Logging commands ====================
+ log [id]: print SendControlBuffer and RecvControlBuffer information about socket with the specified id.
+ sf_benchmark [filename] [ip] [port] [n]: Send a file to the destination socket n times, then display benchmarks.
+ rf_benchmark [filename] [port] [n]: Receive a file on the provided port n times, then display benchmarks.
  ";

@@ -23,7 +23,7 @@ pub const BETA: f64 = 1.5;
 pub const LBOUND: u64 = 10; // in MS
 pub const UBOUND: u64 = 2000; // in MS
 
-pub const WAIT_TIMEOUT: u64 = 1; // in MS
+pub const WAIT_TIMEOUT: u64 = 100; // in MS
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TCPState {
@@ -299,9 +299,9 @@ impl Socket {
      * Process incoming data, either discarding it (if out of window), adding to incoming_segs if
      * out of order, or directly writing to RecvControlBuffer.
      */
-    // pub fn process_data(&self, rcv: RecvControlBuffer, buf: &[u8]) -> Result<()> {
-    // Ok(())
-    // }
+    pub fn process_data(&self, rcv: RecvControlBuffer, buf: &[u8]) -> Result<()> {
+        Ok(())
+    }
 
     /**
      * Sends a SYN segment to the destination.

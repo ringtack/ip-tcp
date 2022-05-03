@@ -1,0 +1,53 @@
+Starting sendfile benchmark (sending "in/long" 50 times to 192.168.0.4:5000)...
+Results: 
+ [1] Time elapsed: 1.973054203s
+ [2] Time elapsed: 6.440708365s
+ [3] Time elapsed: 22.687247874s
+ [4] Time elapsed: 4.319425595s
+ [5] Time elapsed: 7.675443844s
+ [6] Time elapsed: 22.971819666s
+ [7] Time elapsed: 5.190917839s
+ [8] Time elapsed: 6.204846037s
+ [9] Time elapsed: 4.237054071s
+ [10] Time elapsed: 5.132473649s
+ [11] Time elapsed: 6.111998821s
+ [12] Time elapsed: 2.527250059s
+ [13] Time elapsed: 30.29104055s
+ [14] Time elapsed: 4.11954399s
+ [15] Time elapsed: 5.064857189s
+ [16] Time elapsed: 1.099004406s
+ [17] Time elapsed: 4.046105203s
+ [18] Time elapsed: 3.971549307s
+ [19] Time elapsed: 1.079153187s
+ [20] Time elapsed: 1.38814746s
+ [21] Time elapsed: 5.328690939s
+ [22] Time elapsed: 994.688042ms
+ [23] Time elapsed: 23.971040064s
+ [24] Time elapsed: 3.356350643s
+ [25] Time elapsed: 4.857185674s
+ [26] Time elapsed: 2.219925582s
+ [27] Time elapsed: 1.147086718s
+ [28] Time elapsed: 17.863358235s
+ [29] Time elapsed: 12.6018621s
+ [30] Time elapsed: 5.82676057s
+ [31] Time elapsed: 2.116133175s
+ [32] Time elapsed: 1.977167508s
+ [33] Time elapsed: 2.561863681s
+ [34] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+ [35] Time elapsed: 4.652213693s
+ [36] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+ [37] Time elapsed: 35.781667265s
+ [38] Time elapsed: 6.060319679s
+ [39] Time elapsed: 9.430356729s
+ [40] Time elapsed: 31.91250844s
+ [41] Time elapsed: 4.405584774s
+ [42] Time elapsed: 1.870455369s
+ [43] Time elapsed: 7.721318219s
+ [44] Time elapsed: 7.004067559s
+ [45] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+ [46] Time elapsed: 10.420189126s
+ [47] Time elapsed: 10.00848366s
+ [48] Time elapsed: 4.963686584s
+ [49] Time elapsed: 14.208110353s
+ [50] Time elapsed: 8.629300833s
+Average time: 7.76844033s	Total received: 49MB	Rate: 126880.2228B/s

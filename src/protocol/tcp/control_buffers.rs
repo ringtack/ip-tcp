@@ -647,13 +647,10 @@ impl RecvControlBuffer {
      */
     pub fn write(&mut self, data: &[u8], seq_no: u32) -> TCPResult<usize> {
         let msg_len = data.len();
-        let seg_end = seq_no + msg_len as u32;
+        // let seg_end = seq_no + msg_len as u32;
 
-        // TODO: currently, only accepts ----[SEQ_NO...{RCV.NXT...SEG_END]...RCV.NXT+RCV.WND}----,
-        // but ideally want more flexibility
-        if !((seq_no <= self.nxt || self.nxt + self.wnd as u32 <= seq_no)
-            && self.in_window(seg_end))
-        {
+        // Ideally, this is already checked in process_data, but just to be sure...
+        if !self.seg_end_in_wnd(seq_no, msg_len) {
             // eprintln!(
             // "[RCB::write] SEQ {} out of range [{}, {}]",
             // seq_no,
@@ -760,10 +757,55 @@ impl RecvControlBuffer {
      * - seq_no: the desired receive number
      */
     pub fn in_window(&self, seq_no: u32) -> bool {
-        if self.nxt < self.rcv_end() {
-            self.nxt <= seq_no && seq_no <= self.rcv_end()
+        let rcv_end = self.rcv_end();
+        if self.nxt <= rcv_end {
+            self.nxt <= seq_no && seq_no < rcv_end
         } else {
-            self.nxt <= seq_no || seq_no < self.rcv_end()
+            self.nxt <= seq_no || seq_no < rcv_end
+        }
+    }
+
+    /**
+     * Checks if a segment is in the window (i.e. some part is in (2)).
+     *
+     * Inputs:
+     * - seq: the sequence number of the segment
+     * - seg_len: the length of the segment's data
+     */
+    pub fn seg_in_wnd(&self, seq: u32, seg_len: usize) -> bool {
+        let seg_end = seq.saturating_add(seg_len as u32);
+        let rcv_end = self.rcv_end();
+        if self.nxt <= rcv_end {
+            self.nxt <= seg_end && seq < rcv_end
+        } else {
+            // kinda don't want to think about circular buffer stuff rn...
+            let seq_u64 = seq as u64;
+            let seg_end_u64 = seq_u64 + seg_len as u64;
+            let rcv_nxt_u64 = self.nxt as u64;
+            let rcv_end_u64 = (rcv_end as u64) + (BUFFER_SIZE as u64);
+            rcv_nxt_u64 <= seg_end_u64 && seq_u64 < rcv_end_u64
+        }
+    }
+
+    /**
+     * Checks if the segment end is in the window (i.e. SEG.SEQ + SEG.LEN is in (2))
+     *
+     * Inputs:
+     * - seq: the sequence number of the segment
+     * - seg_len: the length of the segment's data
+     */
+    pub fn seg_end_in_wnd(&self, seq: u32, seg_len: usize) -> bool {
+        let seg_end = seq.saturating_add(seg_len as u32);
+        let rcv_end = self.rcv_end();
+        if self.nxt <= rcv_end {
+            seq <= self.nxt && self.nxt <= seg_end && seg_end < rcv_end
+        } else {
+            // kinda don't want to think about circular buffer stuff rn...
+            let seq_u64 = seq as u64;
+            let seg_end_u64 = seq_u64 + seg_len as u64;
+            let rcv_nxt_u64 = self.nxt as u64;
+            let rcv_end_u64 = (rcv_end as u64) + (BUFFER_SIZE as u64);
+            seq_u64 <= rcv_nxt_u64 && rcv_nxt_u64 <= seg_end_u64 && seg_end_u64 < rcv_end_u64
         }
     }
 
@@ -807,7 +849,6 @@ impl RecvControlBuffer {
     /**
      * Checks if buffer is full.
      */
-    #[allow(dead_code)]
     pub fn is_full(&self) -> bool {
         self.len > 0 && self.head == self.tail
     }
@@ -822,7 +863,6 @@ impl RecvControlBuffer {
     /**
      * Returns how much space is left.
      */
-    #[allow(dead_code)]
     pub fn space_left(&self) -> usize {
         if self.tail > self.head {
             self.tail - self.head
@@ -836,7 +876,7 @@ impl RecvControlBuffer {
      */
     #[allow(dead_code)]
     pub fn capacity(&self) -> usize {
-        self.buf.len()
+        BUFFER_SIZE
     }
 
     /**

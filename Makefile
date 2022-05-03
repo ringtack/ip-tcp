@@ -19,4 +19,7 @@ clean:
 	rm -f ./node*
 	rm -f ./out/*
 
+clean_files:
+	rm -f ./out/*
+
 .PHONY: all debug release clean

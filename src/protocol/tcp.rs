@@ -13,7 +13,8 @@ use snafu::prelude::*;
 
 use std::{
     collections::HashSet,
-    io::{Error, ErrorKind, Result},
+    fs::File,
+    io::{prelude::*, BufReader, BufWriter, Error, ErrorKind, Result},
     net::{Ipv4Addr, SocketAddrV4},
     sync::{
         atomic::{AtomicU8, Ordering},
@@ -21,6 +22,7 @@ use std::{
         Arc, Mutex, RwLock,
     },
     thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use self::{
@@ -31,6 +33,10 @@ use crate::protocol::network::{ip_packet::*, Handler, InternetModule};
 
 pub const TCP_PROTOCOL: u8 = 6;
 pub const TCP_TTL: u8 = 60;
+pub const RWBUF_SIZE: usize = 5 * MSS;
+
+pub const SYN_TIMEOUT: u64 = 10; // in secs
+pub const CV_TIMEOUT: u64 = 1000; // in MS
 
 type SocketID = u8;
 
@@ -427,6 +433,200 @@ impl TCPModule {
         for sock_entry in to_delete {
             self.sockets.delete_socket_by_entry(&sock_entry);
         }
+    }
+
+    /**
+     * Helper function to send a file through a socket.
+     *
+     * Inputs:
+     * - addr: the destination address
+     * - port: the destination port
+     * - filename: the input file's path
+     *
+     * Returns:
+     * - The duration and bytes sent, or None if error
+     */
+    pub fn send_file(
+        &self,
+        addr: Ipv4Addr,
+        port: u16,
+        filename: String,
+    ) -> Option<(Duration, usize)> {
+        let cv_timeout = Duration::from_millis(CV_TIMEOUT);
+
+        // connect to desired port
+        let cid = match self.v_connect(addr, port) {
+            Ok(c_id) => c_id,
+            Err(e) => {
+                eprintln!("{}", e);
+                return None;
+            }
+        };
+
+        // wait until Established
+        let sock = self.get_sock(cid).unwrap();
+        let (mtx, cv) = &*sock.pending;
+        let mut m = mtx.lock().unwrap();
+        // set expiration; if doesn't work after 10 seconds, return 0 for both (SYN timeout is 1 +
+        // 2 + 4 = 7s)
+        let syn_wait = Instant::now();
+        let wait_timeout = Duration::from_secs(SYN_TIMEOUT);
+        while sock.get_tcp_state() != TCPState::Established {
+            m = cv.wait_timeout(m, cv_timeout).unwrap().0;
+            // if timeout, return error
+            if syn_wait.elapsed() > wait_timeout {
+                return Some((Duration::ZERO, 0));
+            }
+        }
+        drop(m);
+
+        // now, open file for reading
+        let f = match File::open(filename) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("{e}");
+                self.v_shutdown(cid, ShutdownType::Both).ok();
+                return None;
+            }
+        };
+
+        let mut f = BufReader::new(f);
+        let mut buf = vec![0; RWBUF_SIZE];
+        // for logging purposes
+        let mut total_bytes = 0;
+        let start = Instant::now();
+        loop {
+            match f.read(&mut buf) {
+                Ok(n_read) => {
+                    // println!("writing {n_read} bytes");
+                    if n_read == 0 {
+                        break;
+                    }
+                    total_bytes += n_read;
+                    match self.v_write(cid, &buf[..n_read]) {
+                        Ok(_) => (),
+                        Err(e) => {
+                            // if got here, probably manually shut down
+                            eprintln!("{e}");
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    self.v_shutdown(cid, ShutdownType::Both).ok();
+                    return None;
+                }
+            }
+        }
+        // wait until we've sent all
+        let mut m = mtx.lock().unwrap();
+        while sock.get_snd_len() > 0 {
+            m = cv.wait(m).unwrap();
+        }
+        drop(m);
+
+        // now, we're done writing, so shut down writing side, if not already
+        if sock.get_tcp_state().can_shutdown() {
+            self.v_shutdown(cid, ShutdownType::Write).ok();
+        }
+
+        // wait until socket reaches TimeWait state, or timeout
+        let mut m = mtx.lock().unwrap();
+        let time_wait = Instant::now();
+        while sock.get_tcp_state() != TCPState::TimeWait {
+            m = cv.wait_timeout(m, cv_timeout).unwrap().0;
+            if time_wait.elapsed() > wait_timeout {
+                // doesn't matter too much, already sent everything, so just quit
+                break;
+            }
+        }
+        drop(m);
+
+        Some((Instant::now().duration_since(start), total_bytes))
+    }
+
+    /**
+     * Helper function to receive a file on a port.
+     *
+     * Inputs:
+     * - port: the source port
+     * - filename: the output file's path
+     *
+     * Returns:
+     * - The time elapsed and number of bytes sent, or an error
+     */
+    pub fn recv_file(&self, port: u16, filename: String) -> Option<(Duration, usize)> {
+        let cv_timeout = Duration::from_millis(CV_TIMEOUT);
+
+        // listen on the desired port
+        let lid = match self.v_listen(0.into(), port) {
+            Ok(l_id) => l_id,
+            Err(e) => {
+                eprintln!("{}", e);
+                return None;
+            }
+        };
+        // accept a connection from the listening socket
+        let cid = match self.v_accept(lid) {
+            Ok(c_id) => c_id,
+            Err(e) => {
+                eprintln!("{e}");
+                return None;
+            }
+        };
+        // once we've connected, close mr listener
+        match self.v_shutdown(lid, ShutdownType::Both) {
+            Ok(()) => (),
+            Err(e) => {
+                eprintln!("{e}");
+                self.v_shutdown(cid, ShutdownType::Both).ok();
+                return None;
+            }
+        };
+        // wait until established
+        let sock = self.get_sock(cid).unwrap();
+        let (mtx, cv) = &*sock.pending;
+        let mut m = mtx.lock().unwrap();
+        // set expiration; if doesn't work after 10 seconds, return 0 for both (SYN timeout is 1 +
+        // 2 + 4 = 7s)
+        let rcv_wait = Instant::now();
+        let wait_timeout = Duration::from_secs(SYN_TIMEOUT);
+        while sock.get_tcp_state() != TCPState::Established {
+            m = cv.wait_timeout(m, cv_timeout).unwrap().0;
+            if rcv_wait.elapsed() > wait_timeout {
+                return Some((Duration::ZERO, 0));
+            }
+        }
+        drop(m);
+
+        // now, open file for writing
+        let f = match File::create(&filename) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("{e}");
+                self.v_shutdown(cid, ShutdownType::Both).ok();
+                return None;
+            }
+        };
+        let mut f = BufWriter::new(f);
+
+        // to store what is read
+        let mut buf = vec![0; RWBUF_SIZE];
+        // for logging purposes
+        let start = Instant::now();
+        let mut total_bytes = 0;
+        while let Ok(n_read) = self.v_read(cid, &mut buf, RWBUF_SIZE) {
+            total_bytes += n_read;
+            f.write_all(&buf[..n_read]).ok();
+        }
+
+        // now, we've received FIN, so shut down both
+        self.v_shutdown(cid, ShutdownType::Both).ok();
+        // flush file; we are done!
+        f.flush().ok();
+
+        Some((Instant::now().duration_since(start), total_bytes))
     }
 
     /**

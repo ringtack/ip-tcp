@@ -3,6 +3,7 @@
 An RFC-compliant implementation of IP/TCP over a virtual UDP link layer, built with Rust[^1].
 
 [^1]: Developed for Brown's CSCI1680: Computer Networks.
+
     - TCP handout: https://cs.brown.edu/courses/csci1680/s22/content/tcp.pdf
     - IP handout: https://cs.brown.edu/courses/csci1680/s22/content/ip.pdf
 
@@ -64,7 +65,7 @@ will halt some functionality:
       either the socket's `send_buffer()` method, or as a field (which could make the code slightly more
       ergonomic elsewhere anyways); this would require greater architectural adjustments, but could
       feasibly work.
-      
+
       Fixed! I went with the first naive fix. Some day, I'll take a look at this again...
 
 - [ ] Closing a socket via `v_close()`/`quit` (on the node) doesn't wait until re-transmission is
