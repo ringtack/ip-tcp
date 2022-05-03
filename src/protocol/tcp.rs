@@ -12,7 +12,7 @@ use etherparse::{Ipv4Header, TcpHeader};
 use snafu::prelude::*;
 
 use std::{
-    cmp::min,
+    collections::HashSet,
     io::{Error, ErrorKind, Result},
     net::{Ipv4Addr, SocketAddrV4},
     sync::{
@@ -20,8 +20,7 @@ use std::{
         mpsc::{self, Receiver, Sender, SyncSender},
         Arc, Mutex, RwLock,
     },
-    thread::{self, JoinHandle},
-    time::Duration,
+    thread::JoinHandle,
 };
 
 use self::{
@@ -382,6 +381,46 @@ impl TCPModule {
         }
         // on success, return 0.
         Ok(())
+    }
+
+    /**
+     * Close the socket, making the underlying connection inaccessible to the TCP API functions.
+     * The connection will finish retransmitting any data not yet ACK'd.
+     *
+     * Returns:
+     * - Nothing on success, error on failure.
+     */
+    pub fn v_close(&self, id: SocketID) -> TCPResult<()> {
+        // attempt to find socket associated with ID
+        let sock_entry = self
+            .sockets
+            .get_socket_entry(id)
+            .context(BadFdSnafu { sock_id: id })?;
+        let sock = self.sockets.get_socket_by_entry(&sock_entry).unwrap();
+
+        // send FIN to the other end
+        sock.set_tcp_state(TCPState::FinWait1);
+        sock.send_fin().ok();
+
+        // merk it from the socket list
+        self.sockets.delete_socket_by_entry(&sock_entry);
+
+        Ok(())
+    }
+
+    /**
+     * Close all sockets.
+     */
+    pub fn close_all(&self) {
+        let mut to_delete = HashSet::new();
+        for sock in self.sockets.iter() {
+            sock.set_tcp_state(TCPState::FinWait1);
+            sock.send_fin().ok();
+            to_delete.insert(sock.key().clone());
+        }
+        for sock_entry in to_delete {
+            self.sockets.delete_socket_by_entry(&sock_entry);
+        }
     }
 
     /**

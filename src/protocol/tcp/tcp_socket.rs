@@ -17,7 +17,7 @@ use crate::protocol::{
 };
 
 pub const MSS: usize = 1024; // 536; // RFC 1122, p. 86 says "MUST" default of 536
-pub const MSL: u64 = 10; // in secs
+pub const MSL: u64 = 5; // in secs
 pub const ALPHA: f64 = 0.85;
 pub const BETA: f64 = 1.5;
 pub const LBOUND: u64 = 10; // in MS
@@ -130,7 +130,7 @@ pub struct Socket {
     pub snd: Arc<Mutex<SendControlBuffer>>,
     pub rcv: Arc<Mutex<RecvControlBuffer>>,
     send_tx: SyncSender<IPPacket>,
-    nagles: Arc<AtomicBool>,
+    // nagles: Arc<AtomicBool>,
 
     // Mark as read closed
     pub r_closed: Arc<AtomicBool>,
@@ -161,7 +161,7 @@ impl Socket {
             snd: Arc::new(Mutex::new(SendControlBuffer::new())),
             rcv: Arc::new(Mutex::new(RecvControlBuffer::new())),
             send_tx,
-            nagles: Arc::new(AtomicBool::new(false)),
+            // nagles: Arc::new(AtomicBool::new(false)),
             //
             r_closed: Arc::new(AtomicBool::new(false)),
         }
@@ -299,9 +299,9 @@ impl Socket {
      * Process incoming data, either discarding it (if out of window), adding to incoming_segs if
      * out of order, or directly writing to RecvControlBuffer.
      */
-    pub fn process_data(&self, rcv: RecvControlBuffer, buf: &[u8]) -> Result<()> {
-        Ok(())
-    }
+    // pub fn process_data(&self, rcv: RecvControlBuffer, buf: &[u8]) -> Result<()> {
+    // Ok(())
+    // }
 
     /**
      * Sends a SYN segment to the destination.
@@ -396,13 +396,6 @@ impl Socket {
     }
 
     /**
-     * Gets the amount of space left in the send buffer.
-     */
-    pub fn get_space_left(&self) -> usize {
-        self.snd.lock().unwrap().space_left()
-    }
-
-    /**
      * Gets the number of bytes available in the recv buffer.
      */
     pub fn get_snd_len(&self) -> usize {
@@ -422,6 +415,7 @@ impl Socket {
      * Inputs:
      * - the time receiving the packet
      */
+    #[allow(dead_code)]
     pub fn update_prtt(&self, rtt: Instant) {
         let mut time_sent = self.time_sent.lock().unwrap();
         if *time_sent == None {
@@ -435,6 +429,7 @@ impl Socket {
     /**
      * Set time sent to now.
      */
+    #[allow(dead_code)]
     pub fn set_time_sent(&self) {
         *self.time_sent.lock().unwrap() = Some(Instant::now());
     }
@@ -478,6 +473,13 @@ impl Socket {
      */
     pub fn start_time_wait(&self) {
         *self.time_wait.lock().unwrap() = Some(Instant::now());
+    }
+
+    /**
+     * Get TimeWait timer.
+     */
+    pub fn get_time_wait(&self) -> Option<Instant> {
+        *self.time_wait.lock().unwrap()
     }
 
     /**

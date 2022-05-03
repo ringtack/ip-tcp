@@ -85,6 +85,7 @@ impl SendControlBuffer {
      * Returns:
      * - SEQ of first byte in data + num read, or None
      */
+    #[allow(dead_code)]
     pub fn get_una(&mut self, data: &mut [u8], count: usize) -> Option<(u32, usize)> {
         let count = min(count, min(self.len, self.wnd as usize));
         // if no space, just return
@@ -136,6 +137,7 @@ impl SendControlBuffer {
      * Inputs:
      * - pos: SEQUENCE NUMBER (not buffer pos!)
      */
+    #[allow(dead_code)]
     pub fn get_pos(&mut self, pos: usize, data: &mut [u8], count: usize) -> Option<(u32, usize)> {
         let pos = pos as u32;
         if !self.in_una_window(pos) {
@@ -193,6 +195,7 @@ impl SendControlBuffer {
     /**
      * Gets all un-ACK'd segments from the buffer.
      */
+    #[allow(dead_code)]
     pub fn get_una_segments(&mut self, seg_size: usize) -> Vec<(u32, Vec<u8>)> {
         self.get_off_segments(0, seg_size)
     }
@@ -455,6 +458,7 @@ impl SendControlBuffer {
     /**
      * Checks if buffer is empty.
      */
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -482,19 +486,12 @@ impl SendControlBuffer {
         // self.head, b_pos, self.tail
         // );
 
-        let bytes_left = if self.head == self.tail {
+        if self.head == self.tail {
             if self.len == 0 {
                 0
             } else {
                 self.head + self.len - b_pos
             }
-        // }
-        // let bytes_left = if b_pos == self.head {
-        // if self.head == self.tail {
-        // self.head + self.len - b_pos
-        // } else {
-        // 0
-        // }
         } else if self.tail < self.head {
             if b_pos < self.tail || b_pos >= self.head {
                 0
@@ -507,10 +504,10 @@ impl SendControlBuffer {
             self.head - b_pos
         } else {
             self.head + BUFFER_SIZE - b_pos
-        };
+        }
 
         // eprintln!("[SCB::bytes_left] {bytes_left}");
-        bytes_left
+        // bytes_left
     }
 
     /**
@@ -741,6 +738,7 @@ impl RecvControlBuffer {
      * Inputs:
      * - nxt: next SEQ value received
      */
+    #[allow(dead_code)]
     pub fn set_nxt(&mut self, nxt: u32) {
         self.len += nxt.wrapping_sub(self.nxt) as usize;
         self.head = nxt as usize % BUFFER_SIZE;
@@ -809,6 +807,7 @@ impl RecvControlBuffer {
     /**
      * Checks if buffer is full.
      */
+    #[allow(dead_code)]
     pub fn is_full(&self) -> bool {
         self.len > 0 && self.head == self.tail
     }
@@ -823,6 +822,7 @@ impl RecvControlBuffer {
     /**
      * Returns how much space is left.
      */
+    #[allow(dead_code)]
     pub fn space_left(&self) -> usize {
         if self.tail > self.head {
             self.tail - self.head
@@ -834,6 +834,7 @@ impl RecvControlBuffer {
     /**
      * Returns the capacity of the buffer.
      */
+    #[allow(dead_code)]
     pub fn capacity(&self) -> usize {
         self.buf.len()
     }

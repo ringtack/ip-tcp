@@ -17,3 +17,6 @@ release:
 clean:
 	$(CARGO) clean
 	rm -f ./node*
+	rm -f ./out/*
+
+.PHONY: all debug release clean

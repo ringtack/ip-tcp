@@ -34,7 +34,7 @@ pub struct Node {
     tcp_module: TCPModule,
     trigger: Sender<Ipv4Addr>,
     ip_threads: Vec<thread::JoinHandle<()>>,
-    tcp_threads: Vec<thread::JoinHandle<()>>,
+    // tcp_threads: Vec<thread::JoinHandle<()>>,
     stopped: Arc<AtomicBool>,
 }
 
@@ -132,7 +132,7 @@ impl Node {
             ),
             trigger: tx.clone(),
             ip_threads: Vec::new(),
-            tcp_threads: Vec::new(),
+            // tcp_threads: Vec::new(),
             stopped: stopped.clone(),
         };
 
@@ -188,6 +188,9 @@ impl Node {
      * Gracefully exit the node.
      */
     pub fn quit(&mut self) {
+        // close all sockets.
+        self.tcp_module.close_all();
+
         // notify all threads that we're done by updating stopped flag
         self.stopped.store(true, Ordering::Relaxed);
 
@@ -382,7 +385,7 @@ impl Node {
                     drop(m);
 
                     // now, open file for reading
-                    let f = match File::open(filename) {
+                    let f = match File::open(filename.clone()) {
                         Ok(f) => f,
                         Err(e) => {
                             eprintln!("{e}");
@@ -394,6 +397,7 @@ impl Node {
                     let mut f = BufReader::new(f);
                     let mut buf = vec![0; RWBUF_SIZE];
                     // for logging purposes
+                    let mut total_bytes = 0;
                     let start = Instant::now();
                     loop {
                         match f.read(&mut buf) {
@@ -402,7 +406,15 @@ impl Node {
                                 if n_read == 0 {
                                     break;
                                 }
-                                tcp_module.v_write(cid, &buf[..n_read]).ok();
+                                total_bytes += n_read;
+                                match tcp_module.v_write(cid, &buf[..n_read]) {
+                                    Ok(_) => (),
+                                    Err(e) => {
+                                        // if got here, probably manually shut down
+                                        eprintln!("{e}");
+                                        break;
+                                    }
+                                }
                             }
                             Err(_e) => {
                                 // eprintln!("{e}");
@@ -418,17 +430,19 @@ impl Node {
                     }
                     drop(m);
 
-                    // now, we're done writing, so shut down writing side
-                    tcp_module.v_shutdown(cid, ShutdownType::Write).ok();
+                    // now, we're done writing, so shut down writing side, if not already
+                    if sock.get_tcp_state().can_shutdown() {
+                        tcp_module.v_shutdown(cid, ShutdownType::Write).ok();
+                    }
 
-                    // busy loop until socket reaches TimeWait state; same need for CV...
+                    // wait until socket reaches TimeWait state
                     let mut m = mtx.lock().unwrap();
                     while sock.get_tcp_state() != TCPState::TimeWait {
                         m = cv.wait(m).unwrap();
                     }
                     drop(m);
 
-                    println!("done!");
+                    println!("Sent {total_bytes}B from {filename} to {addr}:{port}!");
                     println!("Time elapsed: {:?}", Instant::now().duration_since(start));
                 });
             }
@@ -499,19 +513,9 @@ impl Node {
                     let mut buf = vec![0; RWBUF_SIZE];
                     // for logging purposes
                     let start = Instant::now();
-                    // while v_read does not error, write to file
-                    // loop {
-                    // match tcp_module.v_read(cid, &mut buf, RWBUF_SIZE) {
-                    // Ok(n_read) => {
-                    // f.write_all(&buf[..n_read]).ok();
-                    // }
-                    // Err(_e) => {
-                    // eprintln!("recv loop: {e}");
-                    // break;
-                    // }
-                    // }
-                    // }
+                    let mut total_bytes = 0;
                     while let Ok(n_read) = tcp_module.v_read(cid, &mut buf, RWBUF_SIZE) {
+                        total_bytes += n_read;
                         f.write_all(&buf[..n_read]).ok();
                     }
 
@@ -520,7 +524,7 @@ impl Node {
                     // flush file; we are done!
                     f.flush().ok();
 
-                    println!("done!");
+                    println!("Received {total_bytes}B into {filename} from 0.0.0.0:{port}!");
                     println!("Time elapsed: {:?}", Instant::now().duration_since(start));
                 });
             }
@@ -550,6 +554,20 @@ impl Node {
                         }
                     }
                     Err(e) => eprintln!("{}", e),
+                }
+            }
+            "cl" => {
+                if args.len() != 2 {
+                    eprintln!("Usage: \"cl <id>\"");
+                    return;
+                }
+                match args[1].parse::<u8>() {
+                    Ok(sid) => {
+                        if let Err(e) = self.tcp_module.v_close(sid) {
+                            eprintln!("{e}");
+                        }
+                    }
+                    Err(e) => eprintln!("{e}"),
                 }
             }
             "down" => {
@@ -667,12 +685,12 @@ fn str_2_ipv4(s: &str) -> Result<Ipv4Addr> {
     }
 }
 
-const HELP_MSG: &str = " help (h)        : Print this list of commands
- interfaces (li) : Print information about each interface, one per line
- routes (lr)     : Print information about the route to each known destination, one per line
- quit (q)        : Quit this node
+const HELP_MSG: &str = " help (h)        : Print this list of commands.
+ interfaces (li) : Print information about each interface, one per line.
+ routes (lr)     : Print information about the route to each known destination, one per line.
+ quit (q)        : Quit this node, closing all open sockets.
 
- sockets (ls)    : Print information about each socket (ID, IP, Port, State)
+ sockets (ls)    : Print information about each socket (ID, IP, Port, State).
  a [port]        : Spawn a socket, bind it to the given port, and start accepting connections on that port.
  c [ip] [port]   : Attempt to connect to the given ip address, in dot notation, on the given port.
 
@@ -687,6 +705,7 @@ const HELP_MSG: &str = " help (h)        : Print this list of commands
 
  sd [id] [read|write|both]: Shutdown a socket. \"read\"/\"r\" closes only the reading side; \"write\"/\"w\"
                             closes only the writing side; \"both\" closes both. Default is \"write\".
+ cl [id]: v_close on the given socket.
 
  send [ip] [protocol] [payload] : sends payload with protocol=protocol to virtual-ip ip
  up [integer]   : Bring an interface \"up\" (it must be an existing interface, probably one you brought down)

@@ -18,9 +18,10 @@ pub fn make_send_loop(
         // infinitely forward packets to IP module until TCP module closes
         for packet in send_rx {
             // send through IP module
-            if let Err(e) = ip_module.send_ip(packet) {
-                eprintln!("[make_send_loop] ip_module.send_ip failed: {}", e);
-            }
+            // if let Err(e) = ip_module.send_ip(packet) {
+            // eprintln!("[make_send_loop] ip_module.send_ip failed: {}", e);
+            // }
+            ip_module.send_ip(packet).ok();
         }
 
         eprintln!("send loop closed")
@@ -355,7 +356,7 @@ pub fn make_segment_loop(
 
                 // if fin and should be next RCV, update rcv.nxt
                 if fin && rcv.nxt == seq_no {
-                    eprintln!("[segment_loop] got fin");
+                    // eprintln!("[segment_loop] got fin");
                     rcv.nxt += 1;
                 }
 
@@ -381,8 +382,7 @@ pub fn make_segment_loop(
                         // if already zero probing, just increment zp_counter
                         if sock.is_zero_probing() {
                             sock.inc_zp_counter();
-
-                            eprintln!("[segment_loop] already zero-probing");
+                            // eprintln!("[segment_loop] already zero-probing");
                             // XXX: should I need to add to pending here?
                             is_pending = true;
                         } else {
@@ -627,6 +627,7 @@ pub fn get_socket_entry_in(ip_hdr: &Ipv4Header, tcp_hdr: &TcpHeader) -> SocketEn
 /**
  * Helper function to get a socket entry from a given IP/TCP Header of an outgoing packet.
  */
+#[allow(dead_code)]
 pub fn get_socket_entry_out(ip_hdr: &Ipv4Header, tcp_hdr: &TcpHeader) -> SocketEntry {
     // TODO: check order, make less scuffed
     let src_sock = SocketAddrV4::new(ip_hdr.source.into(), tcp_hdr.source_port);

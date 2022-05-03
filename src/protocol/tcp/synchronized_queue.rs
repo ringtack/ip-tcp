@@ -45,9 +45,10 @@ where
     /**
      * Peeks the front of the queue.
      */
+    #[allow(dead_code)]
     pub fn front(&mut self) -> Option<T> {
         let queue = self.queue.lock().unwrap();
-        queue.front().map(|elt| elt.clone())
+        queue.front().cloned()
     }
 
     /**
@@ -69,6 +70,7 @@ where
     /**
      * Checks if queue is empty.
      */
+    #[allow(dead_code)]
     pub fn is_empty(&mut self) -> bool {
         self.queue.lock().unwrap().is_empty()
     }
@@ -76,6 +78,7 @@ where
     /**
      * Stops queue, and wakes all waiting threads.
      */
+    #[allow(dead_code)]
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Relaxed);
         self.queue_cv.notify_all();

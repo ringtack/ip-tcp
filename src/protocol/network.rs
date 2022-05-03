@@ -57,6 +57,10 @@ impl InternetModule {
         }
     }
 
+    /**
+     * Register a handler for a specific protocol.
+     */
+    #[allow(dead_code)]
     pub fn register_handler(&self, protocol: u8, handler: Handler) {
         self.handlers.insert(protocol, handler);
     }

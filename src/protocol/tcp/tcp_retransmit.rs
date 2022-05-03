@@ -13,6 +13,7 @@ pub enum RtxState {
     MaxRetransmissions,
     FullyAcked,
     Pending,
+    Expired,
 }
 
 const SYN_RETRANSMIT_LIMIT: usize = 3;
@@ -41,21 +42,27 @@ pub fn check_retransmission(
         // iterate pending_socks
         for sock_entry in pending_socks.iter() {
             let sock_entry = sock_entry.key().clone();
-            let sock = sockets.get_socket_by_entry(&sock_entry).unwrap();
+            let sock = match sockets.get_socket_by_entry(&sock_entry) {
+                Some(s) => s,
+                None => {
+                    to_delete.insert(sock_entry);
+                    continue;
+                }
+            };
 
             match sock.get_tcp_state() {
                 TCPState::SynSent | TCPState::SynRcvd => match check_syn_retransmissions(&sock) {
                     RtxState::FullyAcked => {
-                        println!(
-                            "{}:{} fully established connection!",
-                            *sock.src_sock.ip(),
-                            sock.src_sock.port()
-                        );
+                        // println!(
+                        // "{}:{} fully established connection!",
+                        // *sock.src_sock.ip(),
+                        // sock.src_sock.port()
+                        // );
                         to_delete.insert(sock_entry.clone());
                     }
                     RtxState::MaxRetransmissions => {
                         println!(
-                                    "{}:{} failed to establish connection after {} re-transmissions. Closing socket...",
+                                    "{}:{} failed to send data after {} re-transmissions. Closing socket...",
                                     *sock.src_sock.ip(),
                                     sock.src_sock.port(),
                                     SYN_RETRANSMIT_LIMIT
@@ -68,7 +75,8 @@ pub fn check_retransmission(
                 TCPState::Established
                 | TCPState::FinWait1
                 | TCPState::CloseWait
-                | TCPState::Closing => {
+                | TCPState::Closing
+                | TCPState::LastAck => {
                     let rtx_state = if sock.is_zero_probing() {
                         zero_probe_retransmission(&sock)
                     } else {
@@ -83,6 +91,7 @@ pub fn check_retransmission(
                                 sock.src_sock.port()
                             );
                             to_delete.insert(sock_entry.clone());
+                            // notify CV, might be waiting
                         }
                         RtxState::MaxRetransmissions => {
                             println!(
@@ -97,8 +106,18 @@ pub fn check_retransmission(
                         _ => (),
                     }
                 }
-                TCPState::TimeWait => (),
-                TCPState::LastAck => (),
+                TCPState::TimeWait => {
+                    if let RtxState::Expired = check_timewait_expiration(&sock) {
+                        println!(
+                            "{}:{} has waited over {}s (2 * MSL). Closing socket...",
+                            *sock.src_sock.ip(),
+                            sock.src_sock.port(),
+                            2 * MSL,
+                        );
+                        to_delete.insert(sock_entry.clone());
+                        sockets.delete_socket_by_entry(&sock_entry);
+                    }
+                }
                 _ => (),
             }
         }
@@ -108,7 +127,7 @@ pub fn check_retransmission(
             pending_socks.remove(&sock_entry);
         }
 
-        thread::sleep(Duration::from_micros(1000));
+        thread::sleep(Duration::from_micros(500));
     })
 }
 
@@ -138,7 +157,7 @@ pub fn check_syn_retransmissions(sock: &Socket) -> RtxState {
             // check if timer exceeds 2^(counter)[s]
             let timeout = Duration::from_secs(2_u64.pow(rtx_seg.counter as u32));
             if rtx_seg.send_time.elapsed() > timeout {
-                // println!("timed out; retransmitting");
+                println!("SYN timed out; retransmitting");
                 sock.send(rtx_seg.segment, true, rtx_seg.counter + 1).ok();
             } else {
                 // println!("still pending");
@@ -236,6 +255,27 @@ pub fn check_data_retransmission(sock: &Socket) -> RtxState {
         sock.send(segment.segment, true, segment.counter + 1).ok();
     }
     RtxState::Pending
+}
+
+/**
+ * Handler to check if TimeWait expired.
+ */
+pub fn check_timewait_expiration(sock: &Socket) -> RtxState {
+    // if socket's TimeWait has been over 2*MSL, return Expired; otherwise, indicate Pending
+    let expiration = 2 * Duration::from_secs(MSL);
+    match sock.get_time_wait() {
+        Some(tw) => {
+            if tw.elapsed() > expiration {
+                RtxState::Expired
+            } else {
+                RtxState::Pending
+            }
+        }
+        None => {
+            eprintln!("TimeWait is None, but in TimeWait State.");
+            RtxState::Expired
+        }
+    }
 }
 
 /**
