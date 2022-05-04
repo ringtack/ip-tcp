@@ -191,7 +191,13 @@ pub fn make_segment_loop(
             let sock_entry = get_socket_entry_in(&ip_hdr, &tcp_seg.header);
 
             // get actual sock
-            let sock = sockets.get_socket_by_entry(&sock_entry).unwrap();
+            let sock = match sockets.get_socket_by_entry(&sock_entry) {
+                Some(sock) => sock,
+                None => {
+                    eprintln!("Socket deleted since receiving segment.");
+                    continue;
+                }
+            };
 
             let tcp_state = sock.get_tcp_state();
             let (mut snd, mut rcv) = (sock.snd.lock().unwrap(), sock.rcv.lock().unwrap());
@@ -546,7 +552,7 @@ pub fn dead_socket_handler(
             }
         }
         // shouldn't have to handle this often, so don't contest resources
-        thread::sleep(Duration::from_millis(1000));
+        thread::sleep(Duration::from_millis(750));
     })
 }
 

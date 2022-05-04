@@ -17,7 +17,7 @@ pub enum RtxState {
 }
 
 const SYN_RETRANSMIT_LIMIT: usize = 3;
-const DATA_RETRANSMIT_LIMIT: usize = 15;
+const DATA_RETRANSMIT_LIMIT: usize = 20;
 const ZP_RETRANSMIT_LIMIT: usize = 20;
 
 const MAX_EXP_TIME: u64 = 1200; // in MS
