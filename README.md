@@ -2,8 +2,8 @@
 
 An RFC-compliant[^1][^2] implementation of IP/TCP over a virtual UDP link layer, built with Rust.[^3]
 
-[^1]: IP: [RFC 791](https://datatracker.ietf.org/doc/html/rfc791)
-[^2]: TCP: [RFC 793](https://datatracker.ietf.org/doc/html/rfc793)
+[^1]: IP: RFC [791](https://datatracker.ietf.org/doc/html/rfc791)
+[^2]: TCP: RFCs [793](https://datatracker.ietf.org/doc/html/rfc793) and [1122](https://datatracker.ietf.org/doc/html/rfc1122)
 [^3]: Developed for Brown's CSCI1680: Computer Networks.
 
     - TCP handout: https://cs.brown.edu/courses/csci1680/s22/content/tcp.pdf
@@ -11,6 +11,10 @@ An RFC-compliant[^1][^2] implementation of IP/TCP over a virtual UDP link layer,
 
 
   * [Usage](#usage)
+  * [Benchmarking](#benchmarking)
+  * [Performance](#performance)
+    + [Local Machine](#local-machine)
+    + [Department Machine](#department-machine)
   * [Design](#design)
     + [Node](#node)
     + [TCP](#tcp)
@@ -24,8 +28,6 @@ An RFC-compliant[^1][^2] implementation of IP/TCP over a virtual UDP link layer,
     + [IP](#ip)
       - [Link Layer](#link-layer)
       - [RIP Protocol](#rip-protocol)
-  * [Benchmarking](#benchmarking)
-  * [Performance](#performance)
   * [Packet Capture](#packet-capture)
   * [Bugs and TODOs](#bugs-and-todos)
     + [TCP](#tcp-1)
@@ -48,6 +50,73 @@ node with
 ```bash
 $ ./node <.lnx file>
 ```
+
+## Benchmarking
+
+To benchmark the node's sending capabilities on a lossy network (in this example, we use `ABC.net`), follow the following configuration (make sure to have `in/` and `out/` directories; additionally, `tmux` might help):
+
+- In one terminal, go to the `test/` directory and run the lossy reference IP node with 2% packet loss:
+    ```bash
+    $ ./ip_node_lossy ./B.lnx
+    > lossy 0.02
+    ```
+- In another terminal, run the node and start the `recvfile` benchmark:
+    ```bash
+    $ ./node test/C.lnx
+    > rf_benchmark out/<file> <port> <num_times>
+    ```
+- In one last terminal, run the node and start the `sendfile` benchmark (here, `192.168.0.4` is the virtual IP address of the `test/C.lnx` node; make sure to use the same `<port>` and `<num_times>` values):
+    ```bash
+    $ ./node test/A.lnx
+    > sf_benchmark in/<file> 192.168.0.4 <port> <num_times>
+    ```
+
+Afterwards, results should appear in the `benchmarks/` directory; files appear as `send_<secs_since_UNIX_EPOCH>.txt`. Happy testing!
+
+To generate your own test files, see the appendix.
+
+> `sf_benchmark`/`rf_benchmark` do not handle failure well; they will survive a failed three-way handshake (although `rf_benchmark` will never finish, since it will wait for too many files), but if a `sendfile` call hits the data or `FIN` re-transmission limit (currently `20`), `sf_benchmark` will forever halt. This isn't a large issue, but it does complicate benchmarking with more iterations/a lossier network.
+
+## Performance
+
+### Local Machine
+
+Performance tests were conducted on a 2018 13" MacBook Pro with a 2.3 GHz Quad-Core Intel Core i5 and 16GB RAM in a Ubuntu 20.04 VM with 2 cores and 2GB RAM.
+
+We observed the following performance for the reference node after 20 sends of 1MB files:
+- Over a non-lossy network: **300ms**
+- Over a 2% lossy network: **10s**
+
+We ran four performance benchmarks for our node, two for the non-lossy network and two for the 2% lossy network; in each, we sent a 1MB file 50 times.
+
+| File name | Loss % | Reference Node | Our Node | Factor Speedup
+| --- | --- | --- | --- | --- |
+| send_nonlossy_1651652179_home.txt | 0% | 300ms | **98.9592ms** | **3.0316x** |
+| send_nonlossy_1651659042_home.txt | 0% | 300ms | **85.8941ms** | **3.4927x** |
+| send_1651620102_home.txt | 2% | 10s | **7.7684s** | **1.2873x** |
+| send_1651638729_home.txt | 2% | 10s | **4.7041s** | **2.1258x** |
+
+The results are rather promising; although our node varies significantly in time spent, it is able to consistently match and outperform the reference node.
+
+### Department Machine
+
+Similar performance tests were conducted on the CS department machines (specifically, `mlab1e-l`) with even more impressive results.
+
+We observed the following performance for the reference node after 20 sends of 1MB files:
+- Over a non-lossy network: **80ms**
+- Over a 2% lossy network: **12s**
+
+We again ran four performance benchmarks for our node, two for the non-lossy network and two for the 2% lossy network, with the same configuration.
+
+| File name | Loss % | Reference Node | Our Node | Factor Speedup
+| --- | --- | --- | --- | --- |
+| send_nonlossy_1651656764_dept.txt | 0% | 80ms | **27.2158ms** | **2.9395x** |
+| send_nonlossy_1651657713_dept.txt | 0% | 80ms | **27.0319ms** | **2.9595x** |
+| send_1651657207_dept.txt | 2% | 12s | **1.6025s** | **7.4883x** |
+| send_1651638729_home.txt | 2% | 12s | **1.5526s** | **7.7290x** |
+
+The slowdown on the department machines for the reference node on a 2% lossy network is peculiar, but surprisingly consistent. Our node outperforms the reference node on our local machine, but really shines on the department machines, with sends consistently 1-2s to complete, compared to the reference node's 12s. We hypothesize this may be because the reference node does not make full use of concurrency while our node does, allowing great performance increases on a machine with more cores.
+
 
 ## Design
 
@@ -321,40 +390,6 @@ For routing, our network uses the RIP protocol. On node start, 5 handlers (threa
 - Listening for messages and sending them to a channel
 - Receiving messages from channel and processing them
 
-
-## Benchmarking
-
-To benchmark the node's sending capabilities on a lossy network (in this example, we use `ABC.net`), follow the following configuration (make sure to have `in/` and `out/` directories; additionally, `tmux` might help):
-
-- In one terminal, go to the `test/` directory and run the lossy reference IP node with 2% packet loss:
-    ```bash
-    $ ./ip_node_lossy ./B.lnx
-    > lossy 0.02
-    ```
-- In another terminal, run the node and start the `recvfile` benchmark:
-    ```bash
-    $ ./node test/C.lnx
-    > rf_benchmark out/<file> <port> <num_times>
-    ```
-- In one last terminal, run the node and start the `sendfile` benchmark (here, `192.168.0.4` is the virtual IP address of the `test/C.lnx` node; make sure to use the same `<port>` and `<num_times>` values):
-    ```bash
-    $ ./node test/A.lnx
-    > sf_benchmark in/<file> 192.168.0.4 <port> <num_times>
-    ```
-
-Afterwards, results should appear in the `benchmarks/` directory; files appear as `send_<secs_since_UNIX_EPOCH>.txt`. Happy testing!
-
-To generate your own test files, see the appendix.
-
-> `sf_benchmark`/`rf_benchmark` do not handle failure well; they will survive a failed three-way handshake (although `rf_benchmark` will never finish, since it will wait for too many files), but if a `sendfile` call hits the data or `FIN` re-transmission limit (currently `20`), `sf_benchmark` will forever halt. This isn't a large issue, but it does complicate benchmarking with more iterations/a lossier network.
-
-## Performance
-Through rudimentary testing, we estimate the reference node to require about `12s` to send a 1MB file over a 2% lossy network, and `150ms` over a non-lossy network. We currently have three benchmarks in the directory:
-- `send_1651620102.txt` contains the results of sending a 1MB file over a 2% lossy network 50 times. We achieve an average speed of **7.7684s**, a **54.639%** improvement over the reference node.
-- `send_1651638729.txt` contains the results of sending a 1MB file over a 2% lossy network 25 times. We achieve an average speed of **4.7041s**, a **155.097%** improvement over the reference node.
-- `send_nonlossy_16516521794.txt` contains the results of sending a 1MB file over a non-lossy network 50 times. We achieve an average speed of **98.9592ms**, a **51.578%** improvement over the reference node.
-
-> All performance tests were run in a Ubuntu 20.04 VM on a 2018 13" MacBook Pro with a 2.3 GHz Quad-Core Intel Core i5 and 16GB RAM.
 
 ## Packet Capture
 
