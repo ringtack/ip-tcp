@@ -79,7 +79,7 @@ To generate your own test files, see the appendix.
 
 ## Performance
 
-> Note: the local machine's lossy tests were run with an RTO lower bound of 10ms, instead of 1ms as recommended on local networks. We'll update with new benchmarks soon; for now, refer to the department machine benchmarking results. Benchmarking on non-lossy networks shouldn't be affected, since no re-transmission is necessary.
+> Note: Previous benchmarks used an RTO lower bound of 10ms, instead of 1ms as recommended on local networks. We've moved the old benchmarks into the `benchmarks/old/` directory, and updated the existing results.
 
 ### Local Machine
 
@@ -95,8 +95,8 @@ We ran four performance benchmarks for our node, two for the non-lossy network a
 | --- | --- | --- | --- | --- |
 | send_nonlossy_1651652179_home.txt | 0% | 300ms | **98.9592ms** | **3.0316x** |
 | send_nonlossy_1651659042_home.txt | 0% | 300ms | **85.8941ms** | **3.4927x** |
-| send_1651620102_home.txt | 2% | 10s | **7.7684s** | **1.2873x** |
-| send_1651638729_home.txt | 2% | 10s | **4.7041s** | **2.1258x** |
+| send_1651695516_home.txt | 2% | 10s | **782.7130ms** | **12.7761x** |
+| send_1651695733_home.txt | 2% | 10s | **779.0113ms** | **12.8368x** |
 
 The results are rather promising; although our node varies significantly in time spent, it is able to consistently match and outperform the reference node.
 
