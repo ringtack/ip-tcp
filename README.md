@@ -287,6 +287,7 @@ When sending a large file, there is a brief window in which the sending thread c
 - has a non-empty `SND` buffer,
 - has an empty `SND` window (i.e. `SND.WND == 0`),
 - and is not currently zero-probing,
+
 the thread initiates zero-probing for the socket. This is rather inefficient, but every second is really not that bad in terms of CPU usage (and with our current performance, shouldn't negatively impact sending speeds for super large files; although maybe that just says something about our performance...)
 
 Another, perhaps better, fix could be to include the `pending_socks` set in either the socket's `send_buffer()` method, or as a field (which could make the code slightly more ergonomic elsewhere anyways); this would require greater architectural adjustments, but could feasibly work.
