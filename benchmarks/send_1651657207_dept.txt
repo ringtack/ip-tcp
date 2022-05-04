@@ -1,0 +1,28 @@
+Starting sendfile benchmark (sending "in/long" 25 times to 192.168.0.4:5000)...
+Results: 
+ [1] Time elapsed: 445.985528ms
+ [2] Time elapsed: 2.181726896s
+ [3] Time elapsed: 2.755392955s
+ [4] Time elapsed: 627.964053ms
+ [5] Time elapsed: 1.956853836s
+ [6] Time elapsed: 623.715365ms
+ [7] Time elapsed: 400.947983ms
+ [8] Time elapsed: 474.061371ms
+ [9] Time elapsed: 1.006235306s
+ [10] Time elapsed: 693.053009ms
+ [11] Time elapsed: 1.563305707s
+ [12] Time elapsed: 1.426607748s
+ [13] Time elapsed: 1.269901519s
+ [14] Time elapsed: 676.398976ms
+ [15] Time elapsed: 646.702973ms
+ [16] Time elapsed: 636.935985ms
+ [17] Time elapsed: 588.690392ms
+ [18] Time elapsed: 824.607179ms
+ [19] Time elapsed: 1.128569219s
+ [20] Time elapsed: 1.238783055s
+ [21] Time elapsed: 3.217445712s
+ [22] Time elapsed: 2.502238472s
+ [23] Time elapsed: 1.64370627s
+ [24] Time elapsed: 10.569546529s
+ [25] Time elapsed: 962.452982ms
+Average time: 1.60247316s	Total sent: 26MB	Rate: 654348.5567[B/s]

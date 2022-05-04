@@ -564,6 +564,10 @@ impl Node {
 
                             total_time += elapsed;
                             n_bytes += total_bytes;
+
+                            // sleep for 500ms, to give the receiving end time to cleanup and make
+                            // new socket
+                            thread::sleep(Duration::from_millis(500));
                         } else {
                             println!("The {}th send failed. Halting early...", i + 1);
                             break;
