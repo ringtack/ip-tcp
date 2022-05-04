@@ -21,6 +21,7 @@ const DATA_RETRANSMIT_LIMIT: usize = 20;
 const ZP_RETRANSMIT_LIMIT: usize = 20;
 
 const MAX_EXP_TIME: u64 = 1200; // in MS
+const RTX_SLEEP_TIME: u64 = 5000; // in microseconds
 
 /**
  * Handles all retransmissions
@@ -138,7 +139,7 @@ pub fn check_retransmission(
             pending_socks.remove(&sock_entry);
         }
 
-        thread::sleep(Duration::from_micros(500));
+        thread::sleep(Duration::from_micros(RTX_SLEEP_TIME));
     })
 }
 

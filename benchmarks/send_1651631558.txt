@@ -1,0 +1,22 @@
+Starting sendfile benchmark (sending "in/long" 20 times to 192.168.0.4:5000)...Results: 
+ [1] Time elapsed: 19.57292904s
+ [2] Time elapsed: 36.493921328s
+ [3] Time elapsed: 16.494140243s
+ [4] Time elapsed: 2.580640464s
+ [5] Time elapsed: 4.905139415s
+ [6] Time elapsed: 12.134716295s
+ [7] Time elapsed: 2.044501697s
+ [8] Time elapsed: 5.617418186s
+ [9] Time elapsed: 8.595708086s
+ [10] Time elapsed: 30.909864424s
+ [11] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+ [12] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+ [13] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+ [14] Time elapsed: 8.246468082s
+ [15] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+ [16] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+ [17] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+ [18] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+ [19] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+ [20] Time elapsed: 0ns [FAILED THREE-WAY HANDSHAKE]
+Average time: 7.379772362s	Total sent: 11MB	Rate: 78148.3184[B/s]

@@ -535,6 +535,7 @@ impl Node {
                 let mut result_str = String::from("Results: \n");
                 let mut total_time = Duration::ZERO;
                 let mut n_bytes = 0;
+                let mut n_successful = n;
                 let start = Instant::now();
 
                 let start_str = format!("Starting sendfile benchmark (sending \"{filename}\" {n} times to {addr}:{port})...");
@@ -554,6 +555,7 @@ impl Node {
                             // check if SYN failed to connect
                             if total_bytes == 0 {
                                 result_str.push_str(" [FAILED THREE-WAY HANDSHAKE]");
+                                n_successful -= 1;
                             }
                             // pretty formatting
                             if i != n - 1 {
@@ -570,7 +572,7 @@ impl Node {
                     let n_mb = n_bytes / 1_000_000;
                     let stats = format!(
                         "Average time: {:?}\tTotal sent: {}MB\tRate: {:.4}[B/s]",
-                        total_time.div_f64(n as f64),
+                        total_time.div_f64(n_successful as f64),
                         n_mb,
                         (n_bytes as f64) / total_time.as_secs_f64()
                     );
@@ -588,6 +590,7 @@ impl Node {
                     let results_file = format!("{}/send_{}.txt", SEND_BENCHMARKS_DIR, time_str);
                     let mut results_file = File::create(results_file).unwrap();
                     results_file.write_all(start_str.as_bytes()).ok();
+                    results_file.write(b"\n").ok();
                     results_file.write_all(result_str.as_bytes()).ok();
                     results_file.write(b"\n").ok();
                     results_file.write_all(stats.as_bytes()).ok();
@@ -718,15 +721,21 @@ fn str_2_ipv4(s: &str) -> Result<Ipv4Addr> {
     }
 }
 
-const HELP_MSG: &str = " help (h)        : Print this list of commands.
+const HELP_MSG: &str = " ==================== General node information ====================
+ help (h)        : Print this list of commands.
  interfaces (li) : Print information about each interface, one per line.
  routes (lr)     : Print information about the route to each known destination, one per line.
  quit (q)        : Quit this node, closing all open sockets.
 
+ ==================== Socket creation/shutdown ====================
  sockets (ls)    : Print information about each socket (ID, IP, Port, State).
  a [port]        : Spawn a socket, bind it to the given port, and start accepting connections on that port.
  c [ip] [port]   : Attempt to connect to the given ip address, in dot notation, on the given port.
+ sd [id] [read|write|both]: Shutdown a socket. \"read\"/\"r\" closes only the reading side; \"write\"/\"w\"
+                            closes only the writing side; \"both\" closes both. Default is \"write\".
+ cl [id]: v_close on the given socket.
 
+ ==================== Data transmission commands ====================
  s [sid] [data]  : Send a string to a socket. Blocks until v_write() returns.
  r [sid] [n_bytes] [y|n]: Try to read data from a socket. If last argument \"y\", blocks until n_bytes are
                           read or connection closes. If \"n\" (default), returns whenever v_read() returns.
@@ -736,13 +745,10 @@ const HELP_MSG: &str = " help (h)        : Print this list of commands.
                        read from the socket to the given file. Once the other side closes the connection, close
                        the connection as well.
 
- sd [id] [read|write|both]: Shutdown a socket. \"read\"/\"r\" closes only the reading side; \"write\"/\"w\"
-                            closes only the writing side; \"both\" closes both. Default is \"write\".
- cl [id]: v_close on the given socket.
-
- send [ip] [protocol] [payload] : sends payload with protocol=protocol to virtual-ip ip
- up [integer]   : Bring an interface \"up\" (it must be an existing interface, probably one you brought down)
- down [integer] : Bring an interface \"down\"
+ ==================== IP/network commands ====================
+ send [ip] [protocol] [payload] : sends payload with the specified protocol to the virtual IP address.
+ up [integer]   : Bring an interface \"up\" (it must be an existing interface, probably one you brought down).
+ down [integer] : Bring an interface \"down\".
 
  ==================== Logging commands ====================
  log [id]: print SendControlBuffer and RecvControlBuffer information about socket with the specified id.
