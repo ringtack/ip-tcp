@@ -26,6 +26,7 @@ An RFC-compliant[^1][^2] implementation of IP/TCP over a virtual UDP link layer,
       - [RIP Protocol](#rip-protocol)
   * [Benchmarking](#benchmarking)
   * [Performance](#performance)
+  * [Packet Capture](#packet-capture)
   * [Bugs and TODOs](#bugs-and-todos)
     + [TCP](#tcp-1)
   * [Appendix](#appendix)
@@ -349,9 +350,29 @@ Through rudimentary testing, we estimate the reference node to require about `12
 - `send_1651620102.txt` contains the results of sending a 1MB file over a 2% lossy network 50 times. We achieve an average speed of **7.7684s**, a **54.639%** improvement over the reference node.
 - `send_nonlossy_16516521794.txt` contains the results of sending a 1MB file over a non-lossy network 50 times. We achieve an average speed of **98.9592ms**, a **51.578%** improvement over the reference node.
 
-Other, less glamorous tests exist in the `benchmark/` directory as well. :-(
+Other, less glamorous tests exist in the `benchmark/` directory as well; inspect them if you please :-(. (note that benchmarks with multiple `FAILED THREE-WAY HANDSHAKE`s are a result of `sf_benchmark` lacking appropriate failure recovery, not implementation bugs... I hope)
 
 > All performance tests were run in a Ubuntu 20.04 VM on a 2018 13" MacBook Pro with a 2.3 GHz Quad-Core Intel Core i5 and 16GB RAM.
+
+## Packet Capture
+
+In the `captures/` directory, some Wireshark captures of our nodes in action exist. To use Wireshark with our UDP link layer abstraction, view the `README.md` in the `rip_dissector/` directory. We've annotated a view captures here:
+
+#### `1MB_lossy_capture.pcapng`
+
+This is a packet capture of two nodes running on `ABC.net` running `A.lnx` and `C.lnx` respectively, with the reference `ip_node_lossy` running `B.lnx` with 2% packet loss. To view output from only the sending node, enter the display filter
+```
+not cs168rip and udp.srcport == 5000
+```
+Similarly, to view output from only the receiving node, enter the display filter
+```
+not cs168rip and udp.srcport == 5002
+```
+
+- Frame #5 is the initial `SYN` segment; it is `SYN+ACK`ed by the receiving node in Frame #7, and finally `ACK`ed by the sending node in Frame #9.
+- The sending node then begins transmitting data in segments of size `MSS=536B` (as specified by the RFC). Frame #11 shows a sent segment (later forwarded by the middle node in Frame #27), which is later acknowledged by the receiving node in Frame #263.
+- Starting from Frame #379 until roughly Frame #500, segments were likely lost by the middle node earlier, and thus re-transmitted by the sending node. The receiving node `ACK`s the re-transmitted segments from Frame #609 to roughly Frame #640.
+- Frame #14645 marks the connection teardown, initiated by the sending node via a `FIN` segment; the receiving node `ACK`s the `FIN` in Frame #14647, then sends its own `FIN` in Frame #14648. It is finally `ACK`ed by the sending node in Frame #14656.
 
 ## Bugs and TODOs
 
