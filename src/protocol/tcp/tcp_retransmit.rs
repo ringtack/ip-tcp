@@ -20,8 +20,8 @@ const SYN_RETRANSMIT_LIMIT: usize = 3;
 const DATA_RETRANSMIT_LIMIT: usize = 20;
 const ZP_RETRANSMIT_LIMIT: usize = 20;
 
-const MAX_EXP_TIME: u64 = 1200; // in MS
-const RTX_SLEEP_TIME: u64 = 2500; // in microseconds
+const MAX_EXP_TIME: u64 = 1500; // in MS
+const RTX_SLEEP_TIME: u64 = 2000; // in microseconds
 
 /**
  * Handles all retransmissions

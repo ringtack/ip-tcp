@@ -16,7 +16,7 @@ use crate::protocol::{
     tcp::{control_buffers::*, tcp_errors::*, *},
 };
 
-pub const MSS: usize = 536; // 1024 // RFC 1122, p. 86 says "MUST" default of 536
+pub const MSS: usize = 1024; //536; // RFC 1122, p. 86 says "MUST" default of 536
 pub const MSL: u64 = 15; // in secs
 pub const ALPHA: f64 = 0.85;
 pub const BETA: f64 = 1.5;
@@ -299,9 +299,9 @@ impl Socket {
      * Process incoming data, either discarding it (if out of window), adding to incoming_segs if
      * out of order, or directly writing to RecvControlBuffer.
      */
-    pub fn process_data(&self, rcv: RecvControlBuffer, buf: &[u8]) -> Result<()> {
-        Ok(())
-    }
+    // pub fn process_data(&self, rcv: RecvControlBuffer, buf: &[u8]) -> Result<()> {
+    // Ok(())
+    // }
 
     /**
      * Sends a SYN segment to the destination.

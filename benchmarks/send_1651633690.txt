@@ -1,7 +1,0 @@
-Starting sendfile benchmark (sending "in/long" 4 times to 192.168.0.4:5000)...
-Results: 
- [1] Time elapsed: 1.633895159s
- [2] Time elapsed: 23.982834645s
- [3] Time elapsed: 5.161973096s
- [4] Time elapsed: 47.329846457s
-Average time: 19.527137339s	Total sent: 4MB	Rate: 53698.3984[B/s]

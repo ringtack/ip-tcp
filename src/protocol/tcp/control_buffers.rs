@@ -8,7 +8,7 @@ use std::{
 };
 
 pub const SEQ_MAX: u32 = u32::MAX;
-pub const BUFFER_SIZE: usize = u16::MAX as usize;
+pub const BUFFER_SIZE: usize = 4 * u16::MAX as usize;
 // pub const BUFFER_SIZE: usize = 16;
 pub const BSIZE_U32: u32 = BUFFER_SIZE as u32;
 pub const WIN_SZ: u16 = u16::MAX;
@@ -772,6 +772,7 @@ impl RecvControlBuffer {
      * - seq: the sequence number of the segment
      * - seg_len: the length of the segment's data
      */
+    #[allow(dead_code)]
     pub fn seg_in_wnd(&self, seq: u32, seg_len: usize) -> bool {
         let seg_end = seq.saturating_add(seg_len as u32);
         let rcv_end = self.rcv_end();
@@ -849,6 +850,7 @@ impl RecvControlBuffer {
     /**
      * Checks if buffer is full.
      */
+    #[allow(dead_code)]
     pub fn is_full(&self) -> bool {
         self.len > 0 && self.head == self.tail
     }
@@ -863,6 +865,7 @@ impl RecvControlBuffer {
     /**
      * Returns how much space is left.
      */
+    #[allow(dead_code)]
     pub fn space_left(&self) -> usize {
         if self.tail > self.head {
             self.tail - self.head
