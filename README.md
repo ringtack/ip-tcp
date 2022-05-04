@@ -93,7 +93,7 @@ A central `Node` structure is the centerpiece of our TCP/IP implementation, prov
 
 ### TCP
 
-Here, we describe the structure of our TCP module. Most of the RFC is supported, including:
+Most of the TCP RFC is supported, including:
 - IPv4 header checksum generation/validation
 - Configurable MSS/window sizes
 - Three-way handshake and graceful shutdown, including simultaneous `SYN`s/`FIN`s
