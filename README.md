@@ -343,14 +343,15 @@ To benchmark the node's sending capabilities on a lossy network (in this example
 
 Afterwards, results should appear in the `benchmarks/` directory; files appear as `send_<secs_since_UNIX_EPOCH>.txt`. Happy testing!
 
+To generate your own test files, see the appendix.
+
 > `sf_benchmark`/`rf_benchmark` do not handle failure well; they will survive a failed three-way handshake (although `rf_benchmark` will never finish, since it will wait for too many files), but if a `sendfile` call hits the data or `FIN` re-transmission limit (currently `20`), `sf_benchmark` will forever halt. This isn't a large issue, but it does complicate benchmarking with more iterations/a lossier network.
 
 ## Performance
-Through rudimentary testing, we estimate the reference node to require about `12s` to send a 1MB file over a 2% lossy network, and `150ms` over a non-lossy network. We currently have two benchmarks in the directory:
+Through rudimentary testing, we estimate the reference node to require about `12s` to send a 1MB file over a 2% lossy network, and `150ms` over a non-lossy network. We currently have three benchmarks in the directory:
 - `send_1651620102.txt` contains the results of sending a 1MB file over a 2% lossy network 50 times. We achieve an average speed of **7.7684s**, a **54.639%** improvement over the reference node.
+- `send_1651638729.txt` contains the results of sending a 1MB file over a 2% lossy network 25 times. We achieve an average speed of **4.7041s**, a **155.097%** improvement over the reference node.
 - `send_nonlossy_16516521794.txt` contains the results of sending a 1MB file over a non-lossy network 50 times. We achieve an average speed of **98.9592ms**, a **51.578%** improvement over the reference node.
-
-Other, less glamorous tests exist in the `benchmark/` directory as well; inspect them if you please :-(. (note that benchmarks with multiple `FAILED THREE-WAY HANDSHAKE`s are a result of `sf_benchmark` lacking appropriate failure recovery, not implementation bugs... I hope)
 
 > All performance tests were run in a Ubuntu 20.04 VM on a 2018 13" MacBook Pro with a 2.3 GHz Quad-Core Intel Core i5 and 16GB RAM.
 
@@ -434,6 +435,24 @@ Additionally, there are multiple TODOs that would (hopefully) improve performanc
 
 TODO
 
-#### `SendControlBuffer`/`RecvControlBuffer`
+#### Generating/verifying test files
 
-TODO
+To create your own test files, use the following command:
+
+```bash
+dd if=/dev/urandom of=<out_file> bs=<size> count=1
+```
+
+This copies `<size>` bytes from `/dev/urandom` into `<out_file>` (we've generated one such file, `in/long`, with `size=1M`).
+
+To verify that input and output files are identical, you can either use
+
+```bash
+diff <in_file> <out_file>
+```
+
+or
+
+```bash
+sha1sum <in_file> <out_file>
+```
