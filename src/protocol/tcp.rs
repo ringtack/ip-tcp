@@ -526,6 +526,8 @@ impl TCPModule {
         }
         drop(m);
 
+        let elapsed = start.elapsed();
+
         // now, we're done writing, so shut down writing side, if not already
         if sock.get_tcp_state().can_shutdown() {
             self.v_shutdown(cid, ShutdownType::Write).ok();
@@ -543,7 +545,7 @@ impl TCPModule {
         }
         drop(m);
 
-        Some((Instant::now().duration_since(start), total_bytes))
+        Some((elapsed, total_bytes))
     }
 
     /**
