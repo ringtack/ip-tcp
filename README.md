@@ -1,6 +1,6 @@
 # IP/TCP
 
-An RFC-compliant[^1][^2] implementation of IP/TCP over a virtual UDP link layer, built with Rust[^3].
+An RFC-compliant[^1][^2] implementation of IP/TCP over a virtual UDP link layer, built with Rust.[^3]
 
 [^1]: IP: [RFC 791](https://datatracker.ietf.org/doc/html/rfc791)
 [^2]: TCP: [RFC 793](https://datatracker.ietf.org/doc/html/rfc793)
@@ -397,10 +397,10 @@ Additionally, there are multiple TODOs that would (hopefully) improve performanc
 
 # Appendix
 
-## `.net`/`.lnx` Configuration Files
+#### `.net`/`.lnx` Configuration Files
 
 TODO
 
-## `SendControlBuffer`/`RecvControlBuffer`
+#### `SendControlBuffer`/`RecvControlBuffer`
 
 TODO
