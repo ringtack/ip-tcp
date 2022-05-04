@@ -79,6 +79,8 @@ To generate your own test files, see the appendix.
 
 ## Performance
 
+> Note: the local machine's lossy tests were run with an RTO lower bound of 10ms, instead of 1ms as recommended on local networks. We'll update with new benchmarks soon; for now, refer to the department machine benchmarking results. Benchmarking on non-lossy networks shouldn't be affected, since no re-transmission is necessary.
+
 ### Local Machine
 
 Performance tests were conducted on a 2018 13" MacBook Pro with a 2.3 GHz Quad-Core Intel Core i5 and 16GB RAM in a Ubuntu 20.04 VM with 2 cores and 2GB RAM.
@@ -112,8 +114,8 @@ We again ran four performance benchmarks for our node, two for the non-lossy net
 | --- | --- | --- | --- | --- |
 | send_nonlossy_1651656764_dept.txt | 0% | 80ms | **27.2158ms** | **2.9395x** |
 | send_nonlossy_1651657713_dept.txt | 0% | 80ms | **27.0319ms** | **2.9595x** |
-| send_1651657207_dept.txt | 2% | 12s | **1.6025s** | **7.4883x** |
-| send_1651638729_home.txt | 2% | 12s | **1.5526s** | **7.7290x** |
+| send_1651693707_dept.txt | 2% | 12s | **311.0645ms** | **38.5772x** |
+| send_1651638729_home.txt | 2% | 12s | **305.6566ms** | **39.2597x** |
 
 The slowdown on the department machines for the reference node on a 2% lossy network is peculiar, but surprisingly consistent. Our node outperforms the reference node on our local machine, but really shines on the department machines, with sends consistently 1-2s to complete, compared to the reference node's 12s. We hypothesize this may be because the reference node does not make full use of concurrency while our node does, allowing great performance increases on a machine with more cores.
 
