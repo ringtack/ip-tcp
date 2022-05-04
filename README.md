@@ -362,6 +362,16 @@ In the `captures/` directory, some Wireshark captures of our nodes in action exi
 
 This is a packet capture of two nodes running on `ABC.net` running `A.lnx` and `C.lnx` respectively, with the reference `ip_node_lossy` running `B.lnx` with 2% packet loss. To view output from only the sending node, enter the display filter
 
+```
+not cs168rip and udp.srcport == 5000
+```
+
+Similarly, to view output from only the receiving node, enter the display filter
+
+```
+not cs168rip and udp.srcport == 5002
+```
+
 - Frame #39 is the initial `SYN` segment; it is `SYN+ACK`ed by the receiving node in Frame #41, and finally `ACK`ed by the sending node in Frame #43.
 - The sending node begins transmitting data in segments of size `MSS=1024` (same as the reference node). Frame #43 shows a sent segment, which is later acknowledged by the receiving node in Frame #131.
     * Inspecting the lossy node (`udp.srcport == 5001`), the packet with `SEG.SEQ=1025` is dropped, meaning only one segment actually made it into the other node's `RCV` buffer (at least without out-of-order segments), which required the sending node to re-transmit everything from `SEG.SEQ=1025` to `SEG.SEQ=65536` (Frames #302 to #391). The segments are then successfully `ACK`ed by the receiving node in Frames #392 to #417, then again from #514 to #610.
@@ -370,14 +380,6 @@ This is a packet capture of two nodes running on `ABC.net` running `A.lnx` and `
 #### `1MB_lossy_capture_2.pcapng`
 
 This is a packet capture using the same set-up as above.
-
-```
-not cs168rip and udp.srcport == 5000
-```
-Similarly, to view output from only the receiving node, enter the display filter
-```
-not cs168rip and udp.srcport == 5002
-```
 
 - Frame #5 is the initial `SYN` segment; it is `SYN+ACK`ed by the receiving node in Frame #7, and finally `ACK`ed by the sending node in Frame #9.
 - The sending node then begins transmitting data in segments of size `MSS=536B` (as specified by the RFC). Frame #11 shows a sent segment (later forwarded by the middle node in Frame #27), which is later acknowledged by the receiving node in Frame #263.
